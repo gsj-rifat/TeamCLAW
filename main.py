@@ -1,38 +1,49 @@
-# main.py
 import os
 from dotenv import load_dotenv
-from slack_bot import SlackBot
+from flask import Flask, request, jsonify
 
 # Load environment variables
 load_dotenv()
 
+groq_api_key = os.getenv('GROQ_API_KEY')
+slack_signing_secret = os.getenv('SLACK_SIGNING_SECRET')
+slack_bot_token = os.getenv('SLACK_BOT_TOKEN')
+slack_channel_id = os.getenv('SLACK_CHANNEL_ID')
 
-def main():
-    # Get API keys from environment
-    groq_api_key = os.getenv('GROQ_API_KEY')  # Updated from GROK to GROQ
-    slack_bot_token = os.getenv('SLACK_BOT_TOKEN')
-    slack_signing_secret = os.getenv('SLACK_SIGNING_SECRET')
-    slack_channel_id = os.getenv('SLACK_CHANNEL_ID')
+# Minimal signature verification function (optional, see security note)
+def verify_slack_signature(request):
+    from hashlib import sha256
+    import hmac
+    timestamp = request.headers.get('X-Slack-Request-Timestamp')
+    signature = request.headers.get('X-Slack-Signature')
+    if not timestamp or not signature:
+        return False
+    req_body = request.get_data(as_text=True)
+    sig_basestring = f"v0:{timestamp}:{req_body}"
+    my_sig = 'v0=' + hmac.new(
+        slack_signing_secret.encode(),
+        sig_basestring.encode(),
+        sha256
+    ).hexdigest()
+    return hmac.compare_digest(my_sig, signature)
 
-    # Debug: Check if API key is loaded
-    if not groq_api_key:
-        print("ERROR: GROQ_API_KEY not found in environment variables!")
-        print("Please set your GROQ API key in the .env file")
-        return
+app = Flask(__name__)
 
-    print(f"GROQ_API_KEY loaded: {groq_api_key[:10]}...")  # Show first 10 chars
+@app.route('/slack/events', methods=['POST'])
+def slack_events():
+    data = request.get_json()
+    # Respond to Slack's URL verification challenge
+    if 'challenge' in data:
+        return jsonify({'challenge': data['challenge']})
 
-    # Create bot with GROQ API key
-    bot = SlackBot(
-        groq_api_key=groq_api_key,  # Updated parameter name
-        slack_bot_token=slack_bot_token,
-        slack_signing_secret=slack_signing_secret,
-        slack_channel_id=slack_channel_id
-    )
+    # Optionally verify signature (recommended in production)
+    # if not verify_slack_signature(request):
+    #     return jsonify({'error': 'Invalid signature'}), 403
 
-    print("Starting AI Shadow Coach with GROQ API...")
-    bot.start()
-
+    # Process actual events (example: just print for now)
+    print(f"Received event payload: {data}")
+    return jsonify({'ok': True})
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)

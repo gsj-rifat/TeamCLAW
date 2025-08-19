@@ -5,3 +5,4 @@ groq~=0.31.0
 slack-sdk
 slack-bolt
 requests
+Flask==2.3.3
