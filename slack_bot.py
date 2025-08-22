@@ -1,30 +1,19 @@
-# slack_bot.py
+import os
 from processing_chain import MessageProcessor
 
-
 class SlackBot:
-    def __init__(self, groq_api_key, slack_bot_token, slack_signing_secret, slack_channel_id):
-        # Debug: Verify API key is received
-        print(f"SlackBot received GROQ API key: {groq_api_key[:10] if groq_api_key else 'None'}...")
-
-        if not groq_api_key:
-            raise ValueError("groq_api_key is required but not provided")
-
-        # Initialize message processor with GROQ
-        self.processor = MessageProcessor(groq_api_key)  # Pass GROQ API key
-
-        # Store Slack configuration
-        self.bot_token = slack_bot_token
-        self.signing_secret = slack_signing_secret
-        self.channel_id = slack_channel_id
-
-        print("SlackBot initialized with GROQ LLM")
-
-        # Print model information
-        model_info = self.processor.llm.get_model_info()
-        print(f"Using model best for: {model_info.get('best_for', 'General use')}")
+    def __init__(self, slack_api_token=None, groq_api_key=None):
+        print("🤖 Initializing SlackBot...")
+        self.slack_api_token = slack_api_token or os.getenv("SLACK_API_TOKEN")
+        self.processor = MessageProcessor(groq_api_key=groq_api_key or os.getenv("GROQ_API_KEY"))
+        print("✅ SlackBot ready!")
 
     def start(self):
-        """Start the Slack bot"""
-        print("AI Shadow Coach is now running with GROQ API!")
-        # Your existing Slack bot logic here...
+        # Simulate a bot startup; in a production script, this would connect to Slack RTM API or similar.
+        print("🚦 SlackBot started. Listening for Slack events...")
+
+    # Optionally allow: extraction functionality via CLI or Slack command
+    def extract_transcript(self, transcript: str):
+        result = self.processor.extract_categories(transcript)
+        print(f"[Extraction Result]:\n{result}")
+        return result
