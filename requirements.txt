@@ -1,8 +1,8 @@
 dotenv~=0.9.9
 python-dotenv~=1.1.1
-requests~=2.32.4
 groq~=0.31.0
-slack-sdk
 slack-bolt
-requests
 Flask==2.3.3
+slack-sdk==3.21.3
+requests==2.31.0
+gunicorn==21.2.0
