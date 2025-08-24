@@ -3,3 +3,4 @@ gunicorn==21.2.0
 python-dotenv==1.0.0
 slack-sdk==3.21.3
 requests==2.31.0
+groq==0.4.2
