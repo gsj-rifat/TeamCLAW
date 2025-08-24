@@ -188,6 +188,18 @@ def slack_events():
 
     return jsonify({'status': 'event_ignored'})
 
+@app.route('/test-slack', methods=['GET'])
+def test_slack():
+    test_message = "🧪 Test message from bot!"
+    if TARGET_CHANNEL_ID:
+        success = post_to_slack_channel(TARGET_CHANNEL_ID, test_message)
+        return jsonify({
+            'success': success,
+            'target_channel': TARGET_CHANNEL_ID,
+            'bot_token_configured': bool(os.getenv('SLACK_BOT_TOKEN'))
+        })
+    else:
+        return jsonify({'error': 'No TARGET_CHANNEL_ID configured'})
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
