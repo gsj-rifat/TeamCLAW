@@ -70,6 +70,7 @@ Format as JSON:
         )
 
         result = response.choices[0].message.content.strip()
+        print("🔎 Groq raw result:", result)
 
         # Parse JSON response
         try:
