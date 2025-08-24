@@ -8,7 +8,12 @@ from groq import Groq
 app = Flask(__name__)
 
 # Initialize Groq client
-groq_client = Groq(api_key=os.getenv('GROQ_API_KEY'))
+try:
+    groq_client = Groq(api_key=os.getenv('GROQ_API_KEY'))
+    print("✅ Groq client initialized successfully")
+except Exception as e:
+    print(f"❌ Groq initialization error: {e}")
+    groq_client = None
 
 # Slack configuration
 SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
