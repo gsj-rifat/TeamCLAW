@@ -45,28 +45,23 @@ def verify_slack_request(request):
 
 def extract_insights_with_groq(text):
     """Extract decisions, todos, and facts using Groq"""
+    if not groq_client:
+        print("⚠️ Groq client not available")
+        return {"decisions": [], "todos": [], "facts": []}
+
     try:
-        prompt = f"""
-Analyze the following message and extract:
-1. DECISIONS - Any decisions made or conclusions reached
-2. TODOS - Action items, tasks, or things to be done
-3. FACTS - Key facts, metrics, or important information
+        prompt = f"""Extract insights from this message and respond with ONLY a JSON object:
 
 Message: "{text}"
 
-Format as JSON:
-{{
-  "decisions": ["decision 1", "decision 2"],
-  "todos": ["todo 1", "todo 2"],
-  "facts": ["fact 1", "fact 2"]
-}}
-"""
+Required JSON format (no other text):
+{{"decisions": ["any decisions made"], "todos": ["action items to do"], "facts": ["key facts or metrics"]}}"""
 
         response = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.3-70b-versatile",
             temperature=0.1,
-            max_tokens=1000
+            max_tokens=500
         )
 
         result = response.choices[0].message.content.strip()
@@ -74,12 +69,15 @@ Format as JSON:
 
         # Parse JSON response
         try:
-            return json.loads(result)
-        except json.JSONDecodeError:
+            parsed_result = json.loads(result)
+            print("✅ Parsed insights:", parsed_result)
+            return parsed_result
+        except json.JSONDecodeError as e:
+            print(f"⚠️ Failed to parse JSON: {e}")
             return {"decisions": [], "todos": [], "facts": []}
 
     except Exception as e:
-        print(f"Groq extraction error: {e}")
+        print(f"❌ Groq extraction error: {e}")
         return {"decisions": [], "todos": [], "facts": []}
 
 
