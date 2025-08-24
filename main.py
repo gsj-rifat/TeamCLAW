@@ -64,7 +64,7 @@ Format as JSON:
 
         response = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="mixtral-8x7b-32768",
+            model="mistral-saba-24b",
             temperature=0.1,
             max_tokens=1000
         )
