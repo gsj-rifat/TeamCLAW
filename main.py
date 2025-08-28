@@ -30,11 +30,15 @@ TARGET_CHANNEL_ID = os.getenv('TARGET_CHANNEL_ID')
 # Noise filter configuration (tunable via env)
 NOISE_FILTER_ENABLED = os.getenv('NOISE_FILTER_ENABLED', 'true').lower() == 'true'
 NOISE_MIN_CHARS = int(os.getenv('NOISE_MIN_CHARS', '12'))            # quick heuristic
-NOISE_LLM_THRESHOLD = float(os.getenv('NOISE_LLM_THRESHOLD', '0.55'))  # min confidence
+NOISE_LLM_THRESHOLD = float(os.getenv('NOISE_LLM_THRESHOLD', '0.55'))  # min confidence to accept LLM result
 NOISE_DEBUG = os.getenv('NOISE_DEBUG', 'false').lower() == 'true'
+# Treat short "help" or "question" messages as signal (default true)
+NOISE_TREAT_HELP_AS_SIGNAL = os.getenv('NOISE_TREAT_HELP_AS_SIGNAL', 'true').lower() == 'true'
+# If the classifier fails, default policy: allow (meaningful) or block
+NOISE_FAILSAFE_POLICY = os.getenv('NOISE_FAILSAFE_POLICY', 'allow')  # 'allow' | 'block'
 
-# Model name (kept identical to existing usage)
-GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
+# Model name
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama3.370bversatile')
 
 
 # ---------------------------
@@ -47,22 +51,19 @@ def verify_slack_request(req) -> bool:
     Falls back gracefully if no secret is set (dev mode).
     """
     if not SLACK_SIGNING_SECRET:
-        # Skip verification if secret is not configured (dev)
         return True
 
-    # Accept both hyphenated and non-hyphenated header variants
+    # Prefer official headers; fall back to older non-hyphenated variants if present
     timestamp = req.headers.get('X-Slack-Request-Timestamp') or req.headers.get('XSlackRequestTimestamp', '')
     signature = req.headers.get('X-Slack-Signature') or req.headers.get('XSlackSignature', '')
 
     if not timestamp or not signature:
         return False
 
-    # Optional: replay attack basic guard (5 minutes)
+    # Optional replay protection
     try:
         if abs(time.time() - float(timestamp)) > 60 * 5:
             print("⚠️ Slack request timestamp out of acceptable range.")
-            # You can choose to return False; many bots still accept older timestamps during dev.
-            # return False
     except Exception:
         pass
 
@@ -99,6 +100,15 @@ STRONG_SIGNAL_KEYWORDS = {
     "spec", "doc", "link:", "http://", "https://"
 }
 
+# Ask/help/question patterns we consider meaningful
+ASK_SIGNAL_PATTERNS = [
+    r"\b(help|assist|support)\b",
+    r"\b(question|clarify|clarification)\b",
+    r"\b(stuck|blocker|blocked|issue|bug|error|problem)\b",
+    r"^\s*i need\b",
+    r"^\s*we need\b",
+]
+
 EMOJI_RE = re.compile(r'^[\s\W_]+$')  # only punctuation/emoji/whitespace
 
 def quick_noise_heuristic(text: str) -> str:
@@ -109,31 +119,80 @@ def quick_noise_heuristic(text: str) -> str:
       - 'signal' if clearly meaningful
       - 'maybe' otherwise (defer to LLM)
     """
-    t = (text or "").strip().lower()
+    t = (text or "").strip()
+    tl = t.lower()
 
     # Minimum content length gate
-    if len(t) < NOISE_MIN_CHARS:
+    if len(tl) < NOISE_MIN_CHARS:
         return 'noise'
 
     # Only emojis/punctuation/whitespace
-    if EMOJI_RE.match(t):
+    if EMOJI_RE.match(tl):
         return 'noise'
 
     # Common acknowledgements / small talk (single-line)
-    collapsed = re.sub(r'\s+', ' ', t).strip()
+    collapsed = re.sub(r'\s+', ' ', tl).strip()
     if collapsed in NOISE_ACKS:
         return 'noise'
 
-    # Repetitive short patterns
-    if collapsed in {"ok thanks", "thanks!", "thank you!", "cool thanks"}:
-        return 'noise'
+    # Treat questions/help as signal (configurable)
+    if NOISE_TREAT_HELP_AS_SIGNAL:
+        if "?" in t and len(t) >= NOISE_MIN_CHARS:
+            return 'signal'
+        for pat in ASK_SIGNAL_PATTERNS:
+            if re.search(pat, tl):
+                return 'signal'
 
     # Strong signal keywords (clearly meaningful)
     for kw in STRONG_SIGNAL_KEYWORDS:
-        if kw in t:
+        if kw in tl:
             return 'signal'
 
     return 'maybe'
+
+
+# ---------------------------
+# JSON extraction helper for LLM responses
+# ---------------------------
+
+def extract_json_object(raw: str):
+    """
+    Robustly extract the first JSON object from a text that may include prose,
+    code fences, or be empty. Returns dict or raises.
+    """
+    if not raw:
+        raise ValueError("Empty LLM response")
+
+    # Strip code fences if present
+    s = raw.strip()
+    if s.startswith("```"):
+        # Remove leading and trailing fences
+        s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\s*```$", "", s)
+
+    # If the whole thing parses, use it
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+
+    # Otherwise, find the first balanced JSON object
+    start = s.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found in LLM response")
+
+    depth = 0
+    for i in range(start, len(s)):
+        ch = s[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = s[start:i+1]
+                return json.loads(candidate)
+
+    raise ValueError("Unbalanced JSON object in LLM response")
 
 
 # ---------------------------
@@ -152,7 +211,12 @@ def classify_meaningfulness_with_groq(text: str) -> dict:
       }
     """
     if not groq_client:
-        return {"is_meaningful": True, "category": "update", "confidence": 0.51, "reason": "LLM unavailable; defaulting to meaningful to avoid losing signal."}
+        return {
+            "is_meaningful": True,
+            "category": "update",
+            "confidence": 0.99,  # high to avoid dropping signal when LLM unavailable
+            "reason": "LLM unavailable; defaulting to meaningful to avoid losing signal."
+        }
 
     prompt = f"""
 You are a precise Slack message triage classifier.
@@ -163,12 +227,12 @@ Signal (meaningful) examples:
 - Action items, assignments, owners, deadlines, dates, next steps
 - Status updates with specifics, blockers, risks, asks that require action
 - Requirements, SOP/process info, metrics, links to specs/PRDs with context
-- Meeting notes, summaries, handoffs
+- Meeting notes, summaries, handoffs, requests for help with context
 
 Noise (not meaningful) examples:
 - Greetings, thanks, jokes, emojis, small talk
 - Single-word or short acknowledgements (e.g., "ok", "on it", "thanks")
-- Vague replies with no new info (e.g., "will check", "sounds good")
+- Vague replies with no new info (e.g., "sounds good")
 - Standalone attachments or links without context
 - Duplicates or trivial chatter
 
@@ -195,8 +259,8 @@ Message:
         if NOISE_DEBUG:
             print("🔎 LLM noise-classifier raw:", raw)
 
-        # Ensure strict JSON parsing
-        result = json.loads(raw)
+        result = extract_json_object(raw)
+
         # Validate fields
         is_meaningful = bool(result.get("is_meaningful"))
         category = str(result.get("category") or "noise")
@@ -209,9 +273,22 @@ Message:
             "reason": reason[:300],
         }
     except Exception as e:
+        # Fail-safe based on policy
         print(f"⚠️ LLM classification error: {e}")
-        # Fail-safe: don't lose potential signal
-        return {"is_meaningful": True, "category": "update", "confidence": 0.5, "reason": "Classifier failed; default to process."}
+        if NOISE_FAILSAFE_POLICY == 'allow':
+            return {
+                "is_meaningful": True,
+                "category": "update",
+                "confidence": 0.99,   # ensure it passes threshold
+                "reason": "Classifier failed; fail-safe allow to avoid dropping possible signal."
+            }
+        else:
+            return {
+                "is_meaningful": False,
+                "category": "noise",
+                "confidence": 0.99,
+                "reason": "Classifier failed; fail-safe block."
+            }
 
 
 def is_message_meaningful(text: str) -> tuple[bool, dict]:
@@ -226,16 +303,25 @@ def is_message_meaningful(text: str) -> tuple[bool, dict]:
 
     heuristic = quick_noise_heuristic(text)
     if heuristic == 'noise':
-        return False, {"source": "heuristic", "reason": "Short/ack/emoji/no-content"}
+        decision = False
+        info = {"source": "heuristic", "reason": "Short/ack/emoji/no-content"}
+        if NOISE_DEBUG:
+            print("🧭 Noise decision:", {"heuristic": heuristic, "final_meaningful": decision, "info": info})
+        return decision, info
     if heuristic == 'signal':
-        return True, {"source": "heuristic", "reason": "Contains strong signal keywords"}
+        decision = True
+        info = {"source": "heuristic", "reason": "Contains question/help or strong signal keywords"}
+        if NOISE_DEBUG:
+            print("🧭 Noise decision:", {"heuristic": heuristic, "final_meaningful": decision, "info": info})
+        return decision, info
 
     # Ambiguous → LLM
     result = classify_meaningfulness_with_groq(text)
     meaningful = bool(result.get("is_meaningful", False)) and float(result.get("confidence", 0.0)) >= NOISE_LLM_THRESHOLD
+    final_info = {"source": "llm", **result, "threshold": NOISE_LLM_THRESHOLD}
     if NOISE_DEBUG:
-        print("🧭 Noise filter decision:", {"heuristic": heuristic, "llm": result, "final_meaningful": meaningful})
-    return meaningful, {"source": "llm", **result}
+        print("🧭 Noise decision:", {"heuristic": heuristic, "llm": result, "final_meaningful": meaningful})
+    return meaningful, final_info
 
 
 # ---------------------------
@@ -271,7 +357,6 @@ Required JSON format (no other text):
         try:
             parsed_result = json.loads(result)
             print("✅ Parsed insights:", parsed_result)
-            # Ensure lists exist
             return {
                 "decisions": parsed_result.get("decisions", []) or [],
                 "todos": parsed_result.get("todos", []) or [],
@@ -337,8 +422,12 @@ def format_insights_for_slack(insights: dict, source_channel_id: str) -> str:
 
 
 # ---------------------------
-# Health Endpoint (Existing + Noise Info)
+# Health + Root Endpoints
 # ---------------------------
+
+@app.route('/', methods=['GET'])
+def root():
+    return jsonify({"status": "ok", "service": "AI Shadow Coach", "message": "Running"}), 200
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -349,12 +438,14 @@ def health():
         'target_channel': bool(TARGET_CHANNEL_ID),
         'noise_filter_enabled': NOISE_FILTER_ENABLED,
         'noise_min_chars': NOISE_MIN_CHARS,
-        'noise_llm_threshold': NOISE_LLM_THRESHOLD
+        'noise_llm_threshold': NOISE_LLM_THRESHOLD,
+        'noise_treat_help_as_signal': NOISE_TREAT_HELP_AS_SIGNAL,
+        'noise_failsafe_policy': NOISE_FAILSAFE_POLICY
     })
 
 
 # ---------------------------
-# Slack Events (Modified to gate by noise filter)
+# Slack Events (Gated by noise filter)
 # ---------------------------
 
 @app.route('/slack/events', methods=['POST'])
@@ -389,13 +480,14 @@ def slack_events():
 
             print(f"📨 Processing message from user {user_id}: {message_text[:100]}...")
 
-            # Noise filter gate (NEW)
+            # Noise filter gate
             is_meaningful, filter_info = is_message_meaningful(message_text)
+            print(f"🧩 Noise filter result: meaningful={is_meaningful}, info={filter_info}")
+
             if not is_meaningful:
-                print(f"🔇 Message filtered as noise: {filter_info}")
                 return jsonify({'status': 'noise_filtered', 'reason': filter_info})
 
-            # Extract insights using Groq (existing)
+            # Extract insights
             insights = extract_insights_with_groq(message_text)
 
             # If any insights, format and post
@@ -414,7 +506,7 @@ def slack_events():
 
                 return jsonify({'status': 'processed', 'insights_found': True})
 
-            # No insights extracted (existing behavior)
+            # No insights extracted
             print("ℹ️ No significant insights found in message")
             return jsonify({'status': 'no_insights'})
 
@@ -440,7 +532,7 @@ def test_slack():
 
 
 # ---------------------------
-# Entry Point (Existing)
+# Entry Point
 # ---------------------------
 
 if __name__ == "__main__":
