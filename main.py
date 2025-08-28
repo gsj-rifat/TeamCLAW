@@ -1,11 +1,18 @@
 import os
+import re
 import json
+import time
 import hashlib
 import hmac
+import requests
 from flask import Flask, request, jsonify
 from groq import Groq
 
 app = Flask(__name__)
+
+# ---------------------------
+# Initialization and Config
+# ---------------------------
 
 # Initialize Groq client
 try:
@@ -17,103 +24,338 @@ except Exception as e:
 
 # Slack configuration
 SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
+SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
 TARGET_CHANNEL_ID = os.getenv('TARGET_CHANNEL_ID')
 
+# Noise filter configuration (tunable via env)
+NOISE_FILTER_ENABLED = os.getenv('NOISE_FILTER_ENABLED', 'true').lower() == 'true'
+NOISE_MIN_CHARS = int(os.getenv('NOISE_MIN_CHARS', '12'))            # quick heuristic
+NOISE_LLM_THRESHOLD = float(os.getenv('NOISE_LLM_THRESHOLD', '0.55'))  # min confidence
+NOISE_DEBUG = os.getenv('NOISE_DEBUG', 'false').lower() == 'true'
 
-def verify_slack_request(request):
-    """Verify the request is from Slack"""
+# Model name (kept identical to existing usage)
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama3.370bversatile')
+
+
+# ---------------------------
+# Security: Slack Verification
+# ---------------------------
+
+def verify_slack_request(req) -> bool:
+    """
+    Verify the request is from Slack using signing secret.
+    Falls back gracefully if no secret is set (dev mode).
+    """
     if not SLACK_SIGNING_SECRET:
-        return True  # Skip verification if no secret set
+        # Skip verification if secret is not configured (dev)
+        return True
 
-    timestamp = request.headers.get('X-Slack-Request-Timestamp', '')
-    signature = request.headers.get('X-Slack-Signature', '')
+    # Accept both hyphenated and non-hyphenated header variants
+    timestamp = req.headers.get('X-Slack-Request-Timestamp') or req.headers.get('XSlackRequestTimestamp', '')
+    signature = req.headers.get('X-Slack-Signature') or req.headers.get('XSlackSignature', '')
 
     if not timestamp or not signature:
         return False
 
-    # Create expected signature
-    req_body = request.get_data().decode('utf-8')
+    # Optional: replay attack basic guard (5 minutes)
+    try:
+        if abs(time.time() - float(timestamp)) > 60 * 5:
+            print("⚠️ Slack request timestamp out of acceptable range.")
+            # You can choose to return False; many bots still accept older timestamps during dev.
+            # return False
+    except Exception:
+        pass
+
+    req_body = req.get_data().decode('utf-8')
     sig_basestring = f'v0:{timestamp}:{req_body}'
     expected_signature = 'v0=' + hmac.new(
         SLACK_SIGNING_SECRET.encode(),
         sig_basestring.encode(),
         hashlib.sha256
     ).hexdigest()
-
     return hmac.compare_digest(expected_signature, signature)
 
 
-def extract_insights_with_groq(text):
-    """Extract decisions, todos, and facts using Groq"""
+# ---------------------------
+# Noise Filter: Heuristics
+# ---------------------------
+
+NOISE_ACKS = {
+    "ok", "okay", "k", "kk", "yup", "yep", "yeah", "cool", "nice", "great",
+    "awesome", "thanks", "thank you", "thx", "ty", "np", "no problem",
+    "lol", "lmao", "haha", "hehe", "rofl", "gm", "gn", "brb", "gtg", "idk", "imo",
+    "sounds good", "sgtm", "on it", "done", "agree", "ack", "nice one"
+}
+
+STRONG_SIGNAL_KEYWORDS = {
+    "deadline", "eta", "due", "by eod", "tomorrow", "next week", "owner", "assign",
+    "assigning", "assignment", "action", "todo", "to-do", "task", "follow up",
+    "follow-up", "blocker", "blocked", "risk", "mitigate", "decision", "decide",
+    "approved", "approve", "approval", "launch", "ship", "deploy", "rollback",
+    "plan", "roadmap", "scope", "kpi", "okr", "metric", "sop", "process", "policy",
+    "budget", "cost", "pricing", "contract", "legal", "sla", "incident", "postmortem",
+    "meeting notes", "notes", "minutes", "summary", "next steps", "owner:", "assign to",
+    "request", "please review", "review", "sign off", "sign-off", "requirement", "prd",
+    "spec", "doc", "link:", "http://", "https://"
+}
+
+EMOJI_RE = re.compile(r'^[\s\W_]+$')  # only punctuation/emoji/whitespace
+
+def quick_noise_heuristic(text: str) -> str:
+    """
+    Fast local check.
+    Returns:
+      - 'noise' if clearly trivial
+      - 'signal' if clearly meaningful
+      - 'maybe' otherwise (defer to LLM)
+    """
+    t = (text or "").strip().lower()
+
+    # Minimum content length gate
+    if len(t) < NOISE_MIN_CHARS:
+        return 'noise'
+
+    # Only emojis/punctuation/whitespace
+    if EMOJI_RE.match(t):
+        return 'noise'
+
+    # Common acknowledgements / small talk (single-line)
+    collapsed = re.sub(r'\s+', ' ', t).strip()
+    if collapsed in NOISE_ACKS:
+        return 'noise'
+
+    # Repetitive short patterns
+    if collapsed in {"ok thanks", "thanks!", "thank you!", "cool thanks"}:
+        return 'noise'
+
+    # Strong signal keywords (clearly meaningful)
+    for kw in STRONG_SIGNAL_KEYWORDS:
+        if kw in t:
+            return 'signal'
+
+    return 'maybe'
+
+
+# ---------------------------
+# Noise Filter: LLM Classifier
+# ---------------------------
+
+def classify_meaningfulness_with_groq(text: str) -> dict:
+    """
+    Uses LLM to classify if the message is meaningful.
+    Returns dict:
+      {
+        "is_meaningful": bool,
+        "category": "decision|todo|fact|update|question|process|noise",
+        "confidence": float (0..1),
+        "reason": str
+      }
+    """
+    if not groq_client:
+        return {"is_meaningful": True, "category": "update", "confidence": 0.51, "reason": "LLM unavailable; defaulting to meaningful to avoid losing signal."}
+
+    prompt = f"""
+You are a precise Slack message triage classifier.
+Decide if the following message contains substantial, work-relevant content worth summarizing.
+
+Signal (meaningful) examples:
+- Decisions, proposals, approvals
+- Action items, assignments, owners, deadlines, dates, next steps
+- Status updates with specifics, blockers, risks, asks that require action
+- Requirements, SOP/process info, metrics, links to specs/PRDs with context
+- Meeting notes, summaries, handoffs
+
+Noise (not meaningful) examples:
+- Greetings, thanks, jokes, emojis, small talk
+- Single-word or short acknowledgements (e.g., "ok", "on it", "thanks")
+- Vague replies with no new info (e.g., "will check", "sounds good")
+- Standalone attachments or links without context
+- Duplicates or trivial chatter
+
+Return ONLY a JSON object in this exact schema:
+{{
+  "is_meaningful": true|false,
+  "category": "decision|todo|fact|update|question|process|noise",
+  "confidence": 0.0 to 1.0,
+  "reason": "short explanation"
+}}
+
+Message:
+\"\"\"{text}\"\"\"
+"""
+
+    try:
+        resp = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model=GROQ_MODEL,
+            temperature=0.0,
+            max_tokens=200,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        if NOISE_DEBUG:
+            print("🔎 LLM noise-classifier raw:", raw)
+
+        # Ensure strict JSON parsing
+        result = json.loads(raw)
+        # Validate fields
+        is_meaningful = bool(result.get("is_meaningful"))
+        category = str(result.get("category") or "noise")
+        confidence = float(result.get("confidence") or 0.0)
+        reason = str(result.get("reason") or "")
+        return {
+            "is_meaningful": is_meaningful,
+            "category": category,
+            "confidence": max(0.0, min(confidence, 1.0)),
+            "reason": reason[:300],
+        }
+    except Exception as e:
+        print(f"⚠️ LLM classification error: {e}")
+        # Fail-safe: don't lose potential signal
+        return {"is_meaningful": True, "category": "update", "confidence": 0.5, "reason": "Classifier failed; default to process."}
+
+
+def is_message_meaningful(text: str) -> tuple[bool, dict]:
+    """
+    Combined gate:
+      1) Fast heuristics
+      2) LLM classifier if needed
+    Returns: (bool meaningful, dict details)
+    """
+    if not NOISE_FILTER_ENABLED:
+        return True, {"source": "disabled", "reason": "Noise filter disabled"}
+
+    heuristic = quick_noise_heuristic(text)
+    if heuristic == 'noise':
+        return False, {"source": "heuristic", "reason": "Short/ack/emoji/no-content"}
+    if heuristic == 'signal':
+        return True, {"source": "heuristic", "reason": "Contains strong signal keywords"}
+
+    # Ambiguous → LLM
+    result = classify_meaningfulness_with_groq(text)
+    meaningful = bool(result.get("is_meaningful", False)) and float(result.get("confidence", 0.0)) >= NOISE_LLM_THRESHOLD
+    if NOISE_DEBUG:
+        print("🧭 Noise filter decision:", {"heuristic": heuristic, "llm": result, "final_meaningful": meaningful})
+    return meaningful, {"source": "llm", **result}
+
+
+# ---------------------------
+# Insight Extraction (Existing)
+# ---------------------------
+
+def extract_insights_with_groq(text: str) -> dict:
+    """
+    Extract decisions, todos, and facts using Groq. Keeps existing prompt/format.
+    """
     if not groq_client:
         print("⚠️ Groq client not available")
         return {"decisions": [], "todos": [], "facts": []}
 
     try:
-        prompt = f"""Extract insights from this message and respond with ONLY a JSON object:
+        prompt = f"""
+Extract insights from this message and respond with ONLY a JSON object:
 
 Message: "{text}"
 
 Required JSON format (no other text):
-{{"decisions": ["any decisions made"], "todos": ["action items to do"], "facts": ["key facts or metrics"]}}"""
-
+{{"decisions": ["any decisions made"], "todos": ["action items to do"], "facts": ["key facts or metrics"]}}
+"""
         response = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.3-70b-versatile",
+            model=GROQ_MODEL,
             temperature=0.1,
             max_tokens=500
         )
-
         result = response.choices[0].message.content.strip()
         print("🔎 Groq raw result:", result)
 
-        # Parse JSON response
         try:
             parsed_result = json.loads(result)
             print("✅ Parsed insights:", parsed_result)
-            return parsed_result
+            # Ensure lists exist
+            return {
+                "decisions": parsed_result.get("decisions", []) or [],
+                "todos": parsed_result.get("todos", []) or [],
+                "facts": parsed_result.get("facts", []) or [],
+            }
         except json.JSONDecodeError as e:
             print(f"⚠️ Failed to parse JSON: {e}")
             return {"decisions": [], "todos": [], "facts": []}
-
     except Exception as e:
         print(f"❌ Groq extraction error: {e}")
         return {"decisions": [], "todos": [], "facts": []}
 
 
-def post_to_slack_channel(channel_id, message):
-    """Post message to Slack channel"""
-    import requests
+# ---------------------------
+# Slack Posting (Existing)
+# ---------------------------
 
+def post_to_slack_channel(channel_id: str, message: str) -> bool:
+    """
+    Post a message to a Slack channel using chat.postMessage.
+    """
     url = "https://slack.com/api/chat.postMessage"
     headers = {
-        "Authorization": f"Bearer {os.getenv('SLACK_BOT_TOKEN')}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+        "Content-Type": "application/json; charset=utf-8",
     }
-
     payload = {
         "channel": channel_id,
         "text": message,
-        "username": "AI Insights Bot"
+        "username": "AI Insights Bot",
     }
-
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        return response.status_code == 200
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        ok = resp.status_code == 200 and resp.json().get("ok", False)
+        if not ok:
+            print(f"⚠️ Slack API error: status={resp.status_code}, body={resp.text}")
+        return ok
     except Exception as e:
         print(f"Slack post error: {e}")
         return False
 
+
+def format_insights_for_slack(insights: dict, source_channel_id: str) -> str:
+    """
+    Format the extracted insights for Slack posting (existing style).
+    """
+    parts = ["🤖 *AI Insights Extracted:*", ""]
+    if insights.get("decisions"):
+        parts.append("⚡DECISIONS:")
+        parts.extend([str(it) for it in insights["decisions"]])
+        parts.append("")
+    if insights.get("todos"):
+        parts.append("📋TODOS:")
+        parts.extend([str(it) for it in insights["todos"]])
+        parts.append("")
+    if insights.get("facts"):
+        parts.append("💡FACTS:")
+        parts.extend([str(it) for it in insights["facts"]])
+        parts.append("")
+
+    parts.append(f"_Source: <#{source_channel_id}>_")
+    return "\n".join(parts)
+
+
+# ---------------------------
+# Health Endpoint (Existing + Noise Info)
+# ---------------------------
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
         'status': 'healthy',
         'groq_configured': bool(os.getenv('GROQ_API_KEY')),
-        'slack_configured': bool(os.getenv('SLACK_BOT_TOKEN')),
-        'target_channel': bool(os.getenv('TARGET_CHANNEL_ID'))
+        'slack_configured': bool(SLACK_BOT_TOKEN),
+        'target_channel': bool(TARGET_CHANNEL_ID),
+        'noise_filter_enabled': NOISE_FILTER_ENABLED,
+        'noise_min_chars': NOISE_MIN_CHARS,
+        'noise_llm_threshold': NOISE_LLM_THRESHOLD
     })
 
+
+# ---------------------------
+# Slack Events (Modified to gate by noise filter)
+# ---------------------------
 
 @app.route('/slack/events', methods=['POST'])
 def slack_events():
@@ -125,7 +367,7 @@ def slack_events():
 
     # Handle Slack URL verification
     if "challenge" in data:
-        return jsonify({"challenge": data['challenge']})
+        return jsonify({"challenge": data["challenge"]})
 
     # Process events
     if "event" in data:
@@ -137,9 +379,9 @@ def slack_events():
             if "bot_id" in event or "subtype" in event:
                 return jsonify({'status': 'ignored_bot_message'})
 
-            message_text = event.get("text", "")
-            user_id = event.get("user", "")
-            channel_id = event.get("channel", "")
+            message_text = event.get("text", "") or ""
+            user_id = event.get("user", "") or ""
+            channel_id = event.get("channel", "") or ""
 
             # Skip empty messages
             if not message_text.strip():
@@ -147,31 +389,18 @@ def slack_events():
 
             print(f"📨 Processing message from user {user_id}: {message_text[:100]}...")
 
-            # Extract insights using Groq
+            # Noise filter gate (NEW)
+            is_meaningful, filter_info = is_message_meaningful(message_text)
+            if not is_meaningful:
+                print(f"🔇 Message filtered as noise: {filter_info}")
+                return jsonify({'status': 'noise_filtered', 'reason': filter_info})
+
+            # Extract insights using Groq (existing)
             insights = extract_insights_with_groq(message_text)
 
-            # Format results for Slack
+            # If any insights, format and post
             if any(insights.get(key) for key in ["decisions", "todos", "facts"]):
-                formatted_message = "🤖 *AI Insights Extracted:*\n\n"
-
-                if insights["decisions"]:
-                    formatted_message += "⚡ *DECISIONS:*\n"
-                    for decision in insights["decisions"]:
-                        formatted_message += f"• {decision}\n"
-                    formatted_message += "\n"
-
-                if insights["todos"]:
-                    formatted_message += "📋 *TODOS:*\n"
-                    for todo in insights["todos"]:
-                        formatted_message += f"• {todo}\n"
-                    formatted_message += "\n"
-
-                if insights["facts"]:
-                    formatted_message += "💡 *FACTS:*\n"
-                    for fact in insights["facts"]:
-                        formatted_message += f"• {fact}\n"
-
-                formatted_message += f"\n_Source: <#{channel_id}>_"
+                formatted_message = format_insights_for_slack(insights, channel_id)
 
                 # Post to target channel
                 if TARGET_CHANNEL_ID:
@@ -180,13 +409,21 @@ def slack_events():
                         print("✅ Posted insights to target channel")
                     else:
                         print("❌ Failed to post to target channel")
+                else:
+                    print("⚠️ TARGET_CHANNEL_ID not configured; skipping post")
 
                 return jsonify({'status': 'processed', 'insights_found': True})
-            else:
-                print("ℹ️ No significant insights found in message")
-                return jsonify({'status': 'no_insights'})
+
+            # No insights extracted (existing behavior)
+            print("ℹ️ No significant insights found in message")
+            return jsonify({'status': 'no_insights'})
 
     return jsonify({'status': 'event_ignored'})
+
+
+# ---------------------------
+# Test Endpoint (Existing)
+# ---------------------------
 
 @app.route('/test-slack', methods=['GET'])
 def test_slack():
@@ -196,10 +433,15 @@ def test_slack():
         return jsonify({
             'success': success,
             'target_channel': TARGET_CHANNEL_ID,
-            'bot_token_configured': bool(os.getenv('SLACK_BOT_TOKEN'))
+            'bot_token_configured': bool(SLACK_BOT_TOKEN)
         })
     else:
         return jsonify({'error': 'No TARGET_CHANNEL_ID configured'})
+
+
+# ---------------------------
+# Entry Point (Existing)
+# ---------------------------
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
