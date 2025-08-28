@@ -34,7 +34,7 @@ NOISE_LLM_THRESHOLD = float(os.getenv('NOISE_LLM_THRESHOLD', '0.55'))  # min con
 NOISE_DEBUG = os.getenv('NOISE_DEBUG', 'false').lower() == 'true'
 
 # Model name (kept identical to existing usage)
-GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama3.370bversatile')
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 
 
 # ---------------------------
