@@ -38,7 +38,7 @@ NOISE_TREAT_HELP_AS_SIGNAL = os.getenv('NOISE_TREAT_HELP_AS_SIGNAL', 'true').low
 NOISE_FAILSAFE_POLICY = os.getenv('NOISE_FAILSAFE_POLICY', 'allow')  # 'allow' | 'block'
 
 # Model name
-GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama3.370bversatile')
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 
 
 # ---------------------------
