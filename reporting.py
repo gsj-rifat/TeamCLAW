@@ -29,7 +29,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Any
-import os
+
 from flask import Blueprint, jsonify, request
 
 
@@ -89,7 +89,6 @@ class ReportsService:
             print(f"✅ SQLite initialized at {self.config.db_path}")
         except Exception as exc:
             print(f"❌ SQLite init error: {exc}")
-
 
     def save_insights(
         self,

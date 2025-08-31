@@ -427,7 +427,6 @@ def format_insights_for_slack(insights: dict, source_channel_id: str) -> str:
     parts.append(f"_Source: <#{source_channel_id}>_")
     return "\n".join(parts)
 
-
 # ---- Time-based Reports: service + blueprint registration ----
 reports_service = ReportsService(
     ReportsConfig(
@@ -437,7 +436,6 @@ reports_service = ReportsService(
         default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID,
     )
 )
-
 
 reports_bp = create_reports_blueprint(
     service=reports_service,
