@@ -427,6 +427,23 @@ def format_insights_for_slack(insights: dict, source_channel_id: str) -> str:
     parts.append(f"_Source: <#{source_channel_id}>_")
     return "\n".join(parts)
 
+# --- Ensure persistent DB directory exists and migrate any legacy DB ---
+try:
+    db_dir = os.path.dirname(INSIGHTS_DB_PATH) or "."
+    os.makedirs(db_dir, exist_ok=True)
+
+    legacy_candidates = ["./insights.db", "/app/insights.db"]
+    if not os.path.exists(INSIGHTS_DB_PATH):
+        for cand in legacy_candidates:
+            if os.path.exists(cand):
+                import shutil
+                shutil.copy2(cand, INSIGHTS_DB_PATH)
+                print(f"📦 Migrated legacy insights DB from {cand} -> {INSIGHTS_DB_PATH}")
+                break
+except Exception as e:
+    print(f"⚠️ DB migration/dir creation warning: {e}")
+
+
 # ---- Time-based Reports: service + blueprint registration ----
 reports_service = ReportsService(
     ReportsConfig(
@@ -436,6 +453,12 @@ reports_service = ReportsService(
         default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID,
     )
 )
+
+# Optional one-time merge of legacy DBs (no-op if none found)
+try:
+    reports_service.migrate_from_paths(["./insights.db", "/app/insights.db"])
+except Exception as e:
+    print(f"⚠️ Legacy DB merge skipped: {e}")
 
 reports_bp = create_reports_blueprint(
     service=reports_service,
