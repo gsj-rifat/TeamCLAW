@@ -8,19 +8,9 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: RENDER
-        value: trueservices:
-  - type: web
-    name: ai-shadow
-    env: python
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 main:application"
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.9
-      - key: RENDER
         value: true
 
-      # Existing secrets (set values in dashboard/Render, not in repo)
+      # Secrets (set in Render dashboard)
       - key: GROQ_API_KEY
         sync: false
       - key: SLACK_BOT_TOKEN
@@ -30,17 +20,16 @@ services:
       - key: TARGET_CHANNEL_ID
         sync: false
 
-      # New (optional) reporting config; safe defaults already exist in code
+      # Reporting config (DB on persistent disk)
       - key: INSIGHTS_DB_PATH
         value: /var/data/insights.db
       - key: REPORT_POST_CHANNEL_ID
-        value: ""            # empty = fall back to TARGET_CHANNEL_ID
+        value: ""             # fallback to TARGET_CHANNEL_ID if empty
       - key: REPORT_INCLUDE_FACTS
         value: "true"
       - key: REPORT_MAX_ITEMS
         value: "50"
 
-    # Persist SQLite data across deploys
     disk:
       name: insights-disk
       mountPath: /var/data
