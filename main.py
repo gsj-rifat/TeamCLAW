@@ -8,6 +8,7 @@ import requests
 from flask import Flask, request, jsonify
 from groq import Groq
 from reporting import ReportsService, ReportsConfig, create_reports_blueprint
+from report_commands import SlackReportCommandHandler, SlackReportCommandsConfig, create_slash_commands_blueprint
 
 app = Flask(__name__)
 
@@ -80,6 +81,7 @@ def verify_slack_request(req) -> bool:
         hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(expected_signature, signature)
+
 
 
 # ---------------------------
@@ -441,6 +443,26 @@ reports_bp = create_reports_blueprint(
     post_to_slack=post_to_slack_channel,  # reuse your existing Slack posting function
 )
 app.register_blueprint(reports_bp, url_prefix='/reports')
+# ------------------------------------------------------------
+
+
+# ---- Report Commands: handler + slash command blueprint ----
+report_commands_handler = SlackReportCommandHandler(
+    service=reports_service,
+    post_to_slack=post_to_slack_channel,
+    config=SlackReportCommandsConfig(
+        default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID
+    ),
+)
+
+commands_bp = create_slash_commands_blueprint(
+    handler=report_commands_handler,
+    signature_verifier=verify_slack_request,  # reuse your Slack signing verification
+)
+app.register_blueprint(commands_bp, url_prefix="/slack")
+# ------------------------------------------------------------
+
+
 
 # ---------------------------
 # Health + Root Endpoints
@@ -500,6 +522,37 @@ def slack_events():
                 return jsonify({'status': 'empty_message'})
 
             print(f"📨 Processing message from user {user_id}: {message_text[:100]}...")
+            if event.get("type") == "message":
+                # Skip bot messages and message changes
+                if "bot_id" in event or "subtype" in event:
+                    return jsonify({'status': 'ignored_bot_message'})
+
+                message_text = event.get("text", "") or ""
+                user_id = event.get("user", "") or ""
+                channel_id = event.get("channel", "") or ""
+
+                # 1) App mention: "<@Uxxxx> report daily [YYYY-MM-DD]"
+                if event.get("channel_type") in {"channel", "group", "im", "mpim"}:
+                    mention_or_report = message_text.strip().lower()
+                    if mention_or_report.startswith("report ") or mention_or_report.startswith("<@"):
+                        # Try to interpret as a report command. If it fails, fall through to normal flow.
+                        try:
+                            result = report_commands_handler.handle_text_command(
+                                source_channel_id=channel_id,
+                                text=message_text,
+                                user_id=user_id,
+                            )
+                            return jsonify({
+                                'status': 'report_posted',
+                                'posted': result["posted"],
+                                'period': result["period"],
+                                'date_or_week_start': result["date_or_week_start"],
+                                'counts': result["counts"],
+                                'target_channel': result["target_channel_id"],
+                            })
+                        except ValueError:
+                            # Not a valid report command; continue with the normal pipeline
+                            pass
 
             # Noise filter gate
             is_meaningful, filter_info = is_message_meaningful(message_text)
