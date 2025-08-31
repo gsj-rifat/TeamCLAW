@@ -7,6 +7,7 @@ import hmac
 import requests
 from flask import Flask, request, jsonify
 from groq import Groq
+from reporting import ReportsService, ReportsConfig, create_reports_blueprint
 
 app = Flask(__name__)
 
@@ -26,6 +27,10 @@ except Exception as e:
 SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
 TARGET_CHANNEL_ID = os.getenv('TARGET_CHANNEL_ID')
+INSIGHTS_DB_PATH = os.getenv('INSIGHTS_DB_PATH', 'insights.db')
+REPORT_POST_CHANNEL_ID = os.getenv('REPORT_POST_CHANNEL_ID', TARGET_CHANNEL_ID or '')
+REPORT_INCLUDE_FACTS = os.getenv('REPORT_INCLUDE_FACTS', 'true').lower() == 'true'
+REPORT_MAX_ITEMS = int(os.getenv('REPORT_MAX_ITEMS', '50'))
 
 # Noise filter configuration (tunable via env)
 NOISE_FILTER_ENABLED = os.getenv('NOISE_FILTER_ENABLED', 'true').lower() == 'true'
@@ -420,6 +425,22 @@ def format_insights_for_slack(insights: dict, source_channel_id: str) -> str:
     parts.append(f"_Source: <#{source_channel_id}>_")
     return "\n".join(parts)
 
+# ---- Time-based Reports: service + blueprint registration ----
+reports_service = ReportsService(
+    ReportsConfig(
+        db_path=INSIGHTS_DB_PATH,
+        include_facts=REPORT_INCLUDE_FACTS,
+        max_items=REPORT_MAX_ITEMS,
+        default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID,
+    )
+)
+
+reports_bp = create_reports_blueprint(
+    service=reports_service,
+    default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID,
+    post_to_slack=post_to_slack_channel,  # reuse your existing Slack posting function
+)
+app.register_blueprint(reports_bp, url_prefix='/reports')
 
 # ---------------------------
 # Health + Root Endpoints
@@ -492,6 +513,12 @@ def slack_events():
 
             # If any insights, format and post
             if any(insights.get(key) for key in ["decisions", "todos", "facts"]):
+                reports_service.save_insights(
+                    channel_id=channel_id,
+                    user_id=user_id,
+                    message_text=message_text,
+                    insights=insights,
+                )
                 formatted_message = format_insights_for_slack(insights, channel_id)
 
                 # Post to target channel
