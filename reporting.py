@@ -90,48 +90,6 @@ class ReportsService:
         except Exception as exc:
             print(f"❌ SQLite init error: {exc}")
 
-    def migrate_from_paths(self, sources: list[str]) -> int:
-        """
-        Merge rows from one or more legacy SQLite DBs into the primary DB,
-        avoiding duplicates (by created_at, channel_id, user_id, message_text).
-        Returns the total number of inserted rows.
-        """
-        merged = 0
-        try:
-            conn = self._connect()
-            cur = conn.cursor()
-            for src in sources:
-                try:
-                    if not src or not os.path.exists(src):
-                        continue
-                    if os.path.samefile(src, self.config.db_path):
-                        continue
-                except Exception:
-                    continue
-
-                alias = "legacy"
-                # Safely quote path for ATTACH
-                safe_src = src.replace("'", "''")
-                cur.execute(f"ATTACH DATABASE '{safe_src}' AS {alias}")
-                cur.execute("""
-                    INSERT INTO insights (created_at, date, channel_id, user_id, decisions, todos, facts, message_text)
-                    SELECT li.created_at, li.date, li.channel_id, li.user_id, li.decisions, li.todos, li.facts, li.message_text
-                    FROM legacy.insights AS li
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM insights AS i
-                        WHERE i.created_at = li.created_at
-                          AND i.channel_id = li.channel_id
-                          AND i.user_id = li.user_id
-                          AND i.message_text = li.message_text
-                    )
-                """)
-                # SQLite rowcount is unreliable (-1), so just commit and continue
-                cur.execute("DETACH DATABASE legacy")
-            conn.commit()
-            conn.close()
-        except Exception as exc:
-            print(f"❌ SQLite migrate_from_paths error: {exc}")
-        return merged
 
     def save_insights(
         self,
