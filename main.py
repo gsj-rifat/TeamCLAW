@@ -10,7 +10,7 @@ from groq import Groq
 from reporting import ReportsService, ReportsConfig, create_reports_blueprint
 from report_commands import SlackReportCommandHandler, SlackReportCommandsConfig, create_slash_commands_blueprint
 from sop_generator import SopConfig, SopService, SlackSopCommandHandler, create_sop_blueprint
-
+from sop_readiness import SopReadinessService, SopReadinessConfig, create_sop_readiness_blueprint
 
 
 app = Flask(__name__)
@@ -41,6 +41,10 @@ REPORT_MAX_ITEMS = int(os.getenv('REPORT_MAX_ITEMS', '50'))
 SOP_DEFAULT_DAYS = int(os.getenv('SOP_DEFAULT_DAYS', '14'))
 SOP_MAX_CONTEXT_ITEMS = int(os.getenv('SOP_MAX_CONTEXT_ITEMS', '60'))
 SOP_MODEL = os.getenv('SOP_MODEL', GROQ_MODEL)  # reuse existing model by default
+SOP_READINESS_DEFAULT_DAYS = int(os.getenv('SOP_READINESS_DEFAULT_DAYS', '14'))
+SOP_READINESS_MAX_CONTEXT_ITEMS = int(os.getenv('SOP_READINESS_MAX_CONTEXT_ITEMS', '60'))
+SOP_READINESS_MODEL = os.getenv('SOP_READINESS_MODEL', GROQ_MODEL)
+SOP_AUTOCHECK_BEFORE_GENERATE = os.getenv('SOP_AUTOCHECK_BEFORE_GENERATE', 'true').lower() == 'true'
 
 
 # Noise filter configuration (tunable via env)
@@ -452,6 +456,99 @@ reports_bp = create_reports_blueprint(
 app.register_blueprint(reports_bp, url_prefix='/reports')
 # ------------------------------------------------------------
 
+# ---- SOP Readiness ----
+sop_readiness_service = SopReadinessService(
+    reports=reports_service,
+    groq_client=groq_client,
+    config=SopReadinessConfig(
+        default_days=int(os.getenv('SOP_READINESS_DEFAULT_DAYS', '14')),
+        max_context_items=int(os.getenv('SOP_READINESS_MAX_CONTEXT_ITEMS', '60')),
+        default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID,
+        model_name=os.getenv('SOP_READINESS_MODEL', GROQ_MODEL),
+    ),
+)
+sop_readiness_bp = create_sop_readiness_blueprint(
+    service=sop_readiness_service,
+    post_to_slack=post_to_slack_channel,
+)
+app.register_blueprint(sop_readiness_bp, url_prefix="/sop")
+
+# ---- SOP Generator ----
+sop_service = SopService(
+    reports_service=reports_service,
+    groq_client=groq_client,
+    post_to_slack=post_to_slack_channel,
+    config=SopConfig(
+        default_days=int(os.getenv('SOP_DEFAULT_DAYS', '14')),
+        max_context_items=int(os.getenv('SOP_MAX_CONTEXT_ITEMS', '60')),
+        default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID,
+        model_name=os.getenv('SOP_MODEL', GROQ_MODEL),
+    ),
+)
+sop_handler = SlackSopCommandHandler(sop_service=sop_service)
+
+
+# ---- Enforce readiness before SOP generation (wrap the handler) ----
+_original_handle_text_command = sop_handler.handle_text_command
+
+def handle_sop_with_readiness(text: str, source_channel_id: str, user_id: str = None):
+    import re as _re
+    raw = _re.sub(r"^<@[^>]+>\s*", "", text or "")
+
+    # Parse flags
+    days = None
+    m = _re.search(r"--days\s+(\d{1,3})", raw, flags=_re.IGNORECASE)
+    if m:
+        try:
+            days = int(m.group(1))
+            raw = raw[:m.start()] + raw[m.end():]
+        except Exception:
+            pass
+    if _re.search(r"\bto\s+here\b", raw, flags=_re.IGNORECASE):
+        raw = _re.sub(r"\bto\s+here\b", "", raw, flags=_re.IGNORECASE)
+
+    # Extract topic (same patterns as the SOP handler)
+    topic = None
+    for pat in [
+        r"^\s*sop\s+(?P<topic>.+)$",
+        r"^\s*create\s+sop\s+for\s+(?P<topic>.+)$",
+        r"^\s*create\s+sop\s+(?P<topic>.+)$",
+        r"^\s*make\s+sop\s+for\s+(?P<topic>.+)$",
+        r"^\s*make\s+sop\s+(?P<topic>.+)$",
+    ]:
+        mm = _re.match(pat, raw.strip(), flags=_re.IGNORECASE)
+        if mm and mm.group("topic"):
+            topic = mm.group("topic").strip()
+            break
+
+    # Readiness gate
+    if SOP_AUTOCHECK_BEFORE_GENERATE and topic:
+        readiness = sop_readiness_service.assess_readiness(topic=topic, channel_id=source_channel_id, days=days)
+        if not readiness.get("is_complete", False):
+            prompt = readiness.get("clarification_prompt") or \
+                     f"To complete the SOP for '{topic}', please provide goals, scope, roles, tools/systems, and numbered steps with acceptance criteria."
+            post_to_slack_channel(source_channel_id, f"🧭 *SOP Readiness Check: {topic}*\n\n{prompt}")
+            return {
+                "ok": True,
+                "posted": True,
+                "message": "Clarification requested before SOP generation.",
+                "topic": topic,
+                "is_complete": False,
+                "context_counts": readiness.get("context_counts", {}),
+                "window": {"start": readiness.get("window_start"), "end": readiness.get("window_end")},
+            }
+
+    # Otherwise, proceed with original SOP generation path
+    return _original_handle_text_command(text=text, source_channel_id=source_channel_id, user_id=user_id)
+
+# Monkey-patch so all callers (slash + mentions) go through readiness first
+sop_handler.handle_text_command = handle_sop_with_readiness
+# -------------------------------------------------------------------
+
+
+sop_bp = create_sop_blueprint(sop_handler, verify_slack_request)
+app.register_blueprint(sop_bp, url_prefix="/sop")
+
 
 # ---- Report Commands: handler + slash command blueprint ----
 report_commands_handler = SlackReportCommandHandler(
@@ -468,6 +565,26 @@ commands_bp = create_slash_commands_blueprint(
 )
 app.register_blueprint(commands_bp, url_prefix="/slack")
 # ------------------------------------------------------------
+
+
+# ---- SOP Readiness: service + blueprint ----
+sop_readiness_service = SopReadinessService(
+    reports=reports_service,
+    groq_client=groq_client,
+    config=SopReadinessConfig(
+        default_days=SOP_READINESS_DEFAULT_DAYS,
+        max_context_items=SOP_READINESS_MAX_CONTEXT_ITEMS,
+        default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID,
+        model_name=SOP_READINESS_MODEL,
+    ),
+)
+sop_readiness_bp = create_sop_readiness_blueprint(
+    service=sop_readiness_service,
+    post_to_slack=post_to_slack_channel,
+)
+app.register_blueprint(sop_readiness_bp, url_prefix="/sop")
+# -------------------------------------------------------
+
 
 # ---- SOP: service + handler + blueprint ----
 sop_service = SopService(
