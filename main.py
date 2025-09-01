@@ -9,6 +9,9 @@ from flask import Flask, request, jsonify
 from groq import Groq
 from reporting import ReportsService, ReportsConfig, create_reports_blueprint
 from report_commands import SlackReportCommandHandler, SlackReportCommandsConfig, create_slash_commands_blueprint
+from sop_generator import SopConfig, SopService, SlackSopCommandHandler, create_sop_blueprint
+
+
 
 app = Flask(__name__)
 
@@ -24,6 +27,9 @@ except Exception as e:
     print(f"❌ Groq initialization error: {e}")
     groq_client = None
 
+# Model name
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
+
 # Slack configuration
 SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
@@ -32,6 +38,10 @@ INSIGHTS_DB_PATH = os.getenv('INSIGHTS_DB_PATH', 'insights.db')
 REPORT_POST_CHANNEL_ID = os.getenv('REPORT_POST_CHANNEL_ID', TARGET_CHANNEL_ID or '')
 REPORT_INCLUDE_FACTS = os.getenv('REPORT_INCLUDE_FACTS', 'true').lower() == 'true'
 REPORT_MAX_ITEMS = int(os.getenv('REPORT_MAX_ITEMS', '50'))
+SOP_DEFAULT_DAYS = int(os.getenv('SOP_DEFAULT_DAYS', '14'))
+SOP_MAX_CONTEXT_ITEMS = int(os.getenv('SOP_MAX_CONTEXT_ITEMS', '60'))
+SOP_MODEL = os.getenv('SOP_MODEL', GROQ_MODEL)  # reuse existing model by default
+
 
 # Noise filter configuration (tunable via env)
 NOISE_FILTER_ENABLED = os.getenv('NOISE_FILTER_ENABLED', 'true').lower() == 'true'
@@ -42,9 +52,6 @@ NOISE_DEBUG = os.getenv('NOISE_DEBUG', 'false').lower() == 'true'
 NOISE_TREAT_HELP_AS_SIGNAL = os.getenv('NOISE_TREAT_HELP_AS_SIGNAL', 'true').lower() == 'true'
 # If the classifier fails, default policy: allow (meaningful) or block
 NOISE_FAILSAFE_POLICY = os.getenv('NOISE_FAILSAFE_POLICY', 'allow')  # 'allow' | 'block'
-
-# Model name
-GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 
 
 # ---------------------------
@@ -462,6 +469,24 @@ commands_bp = create_slash_commands_blueprint(
 app.register_blueprint(commands_bp, url_prefix="/slack")
 # ------------------------------------------------------------
 
+# ---- SOP: service + handler + blueprint ----
+sop_service = SopService(
+    reports_service=reports_service,
+    groq_client=groq_client,
+    post_to_slack=post_to_slack_channel,
+    config=SopConfig(
+        default_days=SOP_DEFAULT_DAYS,
+        max_context_items=SOP_MAX_CONTEXT_ITEMS,
+        default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID,
+        model_name=SOP_MODEL,
+    ),
+)
+
+sop_handler = SlackSopCommandHandler(sop_service=sop_service)
+sop_bp = create_sop_blueprint(sop_handler, verify_slack_request)
+app.register_blueprint(sop_bp, url_prefix="/sop")
+# --------------------------------------------
+
 
 
 # ---------------------------
@@ -530,6 +555,36 @@ def slack_events():
                 message_text = event.get("text", "") or ""
                 user_id = event.get("user", "") or ""
                 channel_id = event.get("channel", "") or ""
+
+                # 0) SOP trigger: "@Bot sop <topic>", "sop <topic>", "create sop for <topic>"
+                mention_or_text = (message_text or "").strip().lower()
+                if event.get("channel_type") in {"channel", "group", "im", "mpim"}:
+                    try:
+                        # Try parsing as an SOP command. If it fails, we ignore and continue.
+                        if (
+                                mention_or_text.startswith("sop ")
+                                or mention_or_text.startswith("create sop")
+                                or mention_or_text.startswith("<@")
+                        ) and (" sop " in mention_or_text or mention_or_text.startswith("sop ")):
+                            sop_result = sop_handler.handle_text_command(
+                                text=message_text,  # raw text, handler strips mentions
+                                source_channel_id=channel_id,
+                                user_id=user_id,
+                            )
+                            return jsonify({
+                                "status": "sop_generated",
+                                "posted": sop_result["posted"],
+                                "topic": sop_result["topic"],
+                                "days": sop_result["days"],
+                                "context_counts": sop_result["context_counts"],
+                                "target_channel": sop_result["target_channel_id"],
+                            })
+                    except ValueError:
+                        # Not a valid SOP command; continue with normal flow
+                        pass
+                    except Exception as e:
+                        # Surface as handled error but don't break other flows
+                        return jsonify({"status": "sop_error", "error": str(e)}), 200
 
                 # 1) App mention: "<@Uxxxx> report daily [YYYY-MM-DD]"
                 if event.get("channel_type") in {"channel", "group", "im", "mpim"}:
