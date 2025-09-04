@@ -567,25 +567,6 @@ app.register_blueprint(commands_bp, url_prefix="/slack")
 # ------------------------------------------------------------
 
 
-# ---- SOP Readiness: service + blueprint ----
-sop_readiness_service = SopReadinessService(
-    reports=reports_service,
-    groq_client=groq_client,
-    config=SopReadinessConfig(
-        default_days=SOP_READINESS_DEFAULT_DAYS,
-        max_context_items=SOP_READINESS_MAX_CONTEXT_ITEMS,
-        default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID,
-        model_name=SOP_READINESS_MODEL,
-    ),
-)
-sop_readiness_bp = create_sop_readiness_blueprint(
-    service=sop_readiness_service,
-    post_to_slack=post_to_slack_channel,
-)
-app.register_blueprint(sop_readiness_bp, url_prefix="/sop")
-# -------------------------------------------------------
-
-
 # ---- SOP: service + handler + blueprint ----
 sop_service = SopService(
     reports_service=reports_service,
