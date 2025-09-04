@@ -567,25 +567,6 @@ app.register_blueprint(commands_bp, url_prefix="/slack")
 # ------------------------------------------------------------
 
 
-# ---- SOP: service + handler + blueprint ----
-sop_service = SopService(
-    reports_service=reports_service,
-    groq_client=groq_client,
-    post_to_slack=post_to_slack_channel,
-    config=SopConfig(
-        default_days=SOP_DEFAULT_DAYS,
-        max_context_items=SOP_MAX_CONTEXT_ITEMS,
-        default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID,
-        model_name=SOP_MODEL,
-    ),
-)
-
-sop_handler = SlackSopCommandHandler(sop_service=sop_service)
-sop_bp = create_sop_blueprint(sop_handler, verify_slack_request)
-app.register_blueprint(sop_bp, url_prefix="/sop")
-# --------------------------------------------
-
-
 
 # ---------------------------
 # Health + Root Endpoints
