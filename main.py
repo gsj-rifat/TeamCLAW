@@ -504,6 +504,11 @@ def handle_sop_with_readiness(text: str, source_channel_id: str, user_id: str = 
             raw = raw[:m.start()] + raw[m.end():]
         except Exception:
             pass
+
+    # NEW: parse --force and remove it from the text we pass onward
+    force = bool(_re.search(r"(?:^|\s)--force(?:\s|$)", raw, flags=_re.IGNORECASE))
+    sanitized_text = _re.sub(r"(?:^|\s)--force(?:\s|$)", " ", text or "", flags=_re.IGNORECASE)
+
     if _re.search(r"\bto\s+here\b", raw, flags=_re.IGNORECASE):
         raw = _re.sub(r"\bto\s+here\b", "", raw, flags=_re.IGNORECASE)
 
@@ -521,8 +526,8 @@ def handle_sop_with_readiness(text: str, source_channel_id: str, user_id: str = 
             topic = mm.group("topic").strip()
             break
 
-    # Readiness gate
-    if SOP_AUTOCHECK_BEFORE_GENERATE and topic:
+    # Readiness gate (skip if --force present)
+    if SOP_AUTOCHECK_BEFORE_GENERATE and topic and not force:
         readiness = sop_readiness_service.assess_readiness(topic=topic, channel_id=source_channel_id, days=days)
         if not readiness.get("is_complete", False):
             prompt = readiness.get("clarification_prompt") or \
@@ -538,10 +543,10 @@ def handle_sop_with_readiness(text: str, source_channel_id: str, user_id: str = 
                 "window": {"start": readiness.get("window_start"), "end": readiness.get("window_end")},
             }
 
-    # Otherwise, proceed with original SOP generation path
-    return _original_handle_text_command(text=text, source_channel_id=source_channel_id, user_id=user_id)
+    # If --force, or readiness is complete, proceed to original handler.
+    # IMPORTANT: pass sanitized_text (without --force) so the original parser accepts it.
+    return _original_handle_text_command(text=sanitized_text, source_channel_id=source_channel_id, user_id=user_id)
 
-# Monkey-patch so all callers (slash + mentions) go through readiness first
 sop_handler.handle_text_command = handle_sop_with_readiness
 # -------------------------------------------------------------------
 
