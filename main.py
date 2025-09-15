@@ -5,15 +5,19 @@ import time
 import hashlib
 import hmac
 import requests
-from flask import Flask, request, jsonify
 from groq import Groq
 from reporting import ReportsService, ReportsConfig, create_reports_blueprint
 from report_commands import SlackReportCommandHandler, SlackReportCommandsConfig, create_slash_commands_blueprint
 from sop_generator import SopConfig, SopService, SlackSopCommandHandler, create_sop_blueprint
 from sop_readiness import SopReadinessService, SopReadinessConfig, create_sop_readiness_blueprint
+from datetime import datetime, timezone, timedelta
+from flask import Flask, request, jsonify, Blueprint, send_from_directory
 
 
 app = Flask(__name__)
+# WSGI alias for gunicorn (main:application)
+application = app
+
 
 # ---------------------------
 # Initialization and Config
@@ -56,6 +60,115 @@ NOISE_DEBUG = os.getenv('NOISE_DEBUG', 'false').lower() == 'true'
 NOISE_TREAT_HELP_AS_SIGNAL = os.getenv('NOISE_TREAT_HELP_AS_SIGNAL', 'true').lower() == 'true'
 # If the classifier fails, default policy: allow (meaningful) or block
 NOISE_FAILSAFE_POLICY = os.getenv('NOISE_FAILSAFE_POLICY', 'allow')  # 'allow' | 'block'
+
+
+
+# ---------------------------
+# Dashboard API Auth (X-Auth-Token)
+# ---------------------------
+
+DEV_MODE = os.getenv("RENDER", "false").lower() != "true"
+
+def _load_dashboard_tokens():
+    raw = os.getenv("DASHBOARD_TOKENS", "{}")
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
+
+_DASHBOARD_TOKENS = _load_dashboard_tokens()
+
+def _get_role_from_request(req):
+    # Header names tolerated
+    token = (req.headers.get("X-Auth-Token") or req.headers.get("XAuthToken") or "").strip()
+    role = _DASHBOARD_TOKENS.get(token)
+    if role:
+        return role
+    # If no tokens are configured, allow read-only access in local dev for convenience
+    if not _DASHBOARD_TOKENS and DEV_MODE:
+        return "viewer"
+    return None
+
+def require_dashboard_role(*allowed_roles):
+    def deco(fn):
+        def inner(*args, **kwargs):
+            role = _get_role_from_request(request)
+            if not role or (allowed_roles and role not in allowed_roles):
+                return jsonify({"error": "unauthorized"}), 401
+            return fn(*args, **kwargs)
+        inner.__name__ = fn.__name__
+        return inner
+    return deco
+
+# ---------------------------
+# Dashboard Auth (viewer/user/admin) via env tokens
+# ---------------------------
+
+def _parse_token_list(raw: str) -> set[str]:
+    if not raw:
+        return set()
+    # Accept comma or whitespace separated
+    parts = []
+    for chunk in raw.replace(",", " ").split():
+        t = chunk.strip()
+        if t:
+            parts.append(t)
+    return set(parts)
+
+DASHBOARD_VIEWER_TOKENS = _parse_token_list(os.getenv("DASHBOARD_VIEWER_TOKENS", ""))
+DASHBOARD_USER_TOKENS   = _parse_token_list(os.getenv("DASHBOARD_USER_TOKENS", ""))
+DASHBOARD_ADMIN_TOKENS  = _parse_token_list(os.getenv("DASHBOARD_ADMIN_TOKENS", ""))
+
+ROLE_RANK = {"viewer": 0, "user": 1, "admin": 2}
+
+def _extract_token_from_request(req) -> str | None:
+    # Prefer custom header used by the dashboard
+    tok = (req.headers.get("X-Auth-Token") or "").strip()
+    if tok:
+        return tok
+    # Fallback: Authorization: Bearer <token>
+    auth = req.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip() or None
+    # Optional: dev fallback to query param ?token=
+    q = req.args.get("token")
+    if q and q.strip():
+        return q.strip()
+    return None
+
+def resolve_dashboard_role_from_token(tok: str | None) -> str | None:
+    if not tok:
+        return None
+    if tok in DASHBOARD_ADMIN_TOKENS:
+        return "admin"
+    if tok in DASHBOARD_USER_TOKENS:
+        return "user"
+    if tok in DASHBOARD_VIEWER_TOKENS:
+        return "viewer"
+    return None
+
+def require_dashboard_role(*allowed_roles: str):
+    """
+    Decorator to protect dashboard API endpoints with role-based auth.
+    Usage: @require_dashboard_role("viewer","user","admin")  # allow all
+           @require_dashboard_role("user","admin")
+           @require_dashboard_role("admin")
+    """
+    def _decorator(fn):
+        from functools import wraps
+        @wraps(fn)
+        def _wrapped(*args, **kwargs):
+            token = _extract_token_from_request(request)
+            role = resolve_dashboard_role_from_token(token)
+            if role is None:
+                return jsonify({"error": "Unauthorized"}), 401
+            if allowed_roles and role not in allowed_roles:
+                return jsonify({"error": "Forbidden", "role": role}), 403
+            # ok
+            return fn(*args, **kwargs)
+        return _wrapped
+    return _decorator
+
 
 
 # ---------------------------
@@ -572,6 +685,886 @@ app.register_blueprint(commands_bp, url_prefix="/slack")
 # ------------------------------------------------------------
 
 
+# ---------------------------
+# Dashboard API (read-only MVP)
+# ---------------------------
+
+dashboard_api = Blueprint("dashboard_api", __name__)
+
+def _db_connect_for_dashboard():
+    # Reuse the ReportsService connection (same SQLite DB)
+    return reports_service._connect()
+
+@dashboard_api.get("/stats")
+@require_dashboard_role("viewer", "user", "admin")
+def dashboard_stats():
+    """
+    Counts of insights for today and this week (UTC).
+    SOPs and summaries will remain 0 in Step 2 (filled in later steps).
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        today_end = today_start + timedelta(days=1)
+
+        week_start = today_start - timedelta(days=today_start.weekday())  # Monday UTC
+        week_end = week_start + timedelta(days=7)
+
+        conn = _db_connect_for_dashboard()
+        cur = conn.cursor()
+
+        def _count_insights(start_dt, end_dt):
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM insights WHERE created_at >= ? AND created_at < ?",
+                (int(start_dt.timestamp()), int(end_dt.timestamp())),
+            )
+            row = cur.fetchone()
+            return int((row["c"] if row else 0) or 0)
+
+        insights_today = _count_insights(today_start, today_end)
+        insights_week = _count_insights(week_start, week_end)
+
+        conn.close()
+        return jsonify({
+            "status": "ok",
+            "stats": {
+                "insights": {"today": insights_today, "week": insights_week},
+                "sops": {"today": 0, "week": 0},
+                "summaries": {"today": 0, "week": 0},
+            }
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+@dashboard_api.get("/activities")
+@require_dashboard_role("viewer", "user", "admin")
+def dashboard_activities():
+    """
+    Recent insight events derived from the insights table.
+    """
+    try:
+        limit = int(request.args.get("limit", "100"))
+        conn = _db_connect_for_dashboard()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, created_at, channel_id, message_text, decisions, todos, facts
+            FROM insights
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (limit,))
+        rows = cur.fetchall()
+        conn.close()
+
+        items = []
+        for r in rows:
+            try:
+                dec = len(json.loads(r["decisions"] or "[]"))
+            except Exception:
+                dec = 0
+            try:
+                tds = len(json.loads(r["todos"] or "[]"))
+            except Exception:
+                tds = 0
+            try:
+                fcts = len(json.loads(r["facts"] or "[]"))
+            except Exception:
+                fcts = 0
+
+            items.append({
+                "id": r["id"],
+                "timestamp": int(r["created_at"]),
+                "type": "insight_saved",
+                "channel_id": r["channel_id"] or "",
+                "meta": {
+                    "message_preview": (r["message_text"] or "")[:140],
+                    "counts": {"decisions": dec, "todos": tds, "facts": fcts},
+                }
+            })
+
+        return jsonify({"status": "ok", "items": items})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+# ---------------------------
+# Reports (read-only)
+# ---------------------------
+
+@dashboard_api.get("/reports")
+@require_dashboard_role("viewer", "user", "admin")
+def dashboard_reports():
+    """
+    Generate daily or weekly reports for a date range (UTC), optionally filtered by channel_id.
+    Query params:
+      - granularity: "daily" (default) or "weekly"
+      - start: YYYY-MM-DD (required)
+      - end:   YYYY-MM-DD (required; inclusive range)
+      - channel_id: optional Slack channel ID to filter
+    Response:
+      { status: "ok", items: [ { period, label, channel_filter, counts, report_text }, ... ] }
+    """
+    try:
+        granularity = (request.args.get("granularity") or "daily").lower()
+        start_str = request.args.get("start")
+        end_str = request.args.get("end")
+        channel_id = request.args.get("channel_id")
+
+        if granularity not in ("daily", "weekly"):
+            return jsonify({"error": "granularity must be 'daily' or 'weekly'"}), 400
+        if not start_str or not end_str:
+            return jsonify({"error": "start and end (YYYY-MM-DD) are required"}), 400
+
+        # Parse dates (UTC boundaries)
+        try:
+            start_dt = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            end_dt_inclusive = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+
+        # Iterate periods and build reports
+        items = []
+        if granularity == "daily":
+            cur = start_dt
+            final = end_dt_inclusive + timedelta(days=1)  # exclusive bound
+            while cur < final:
+                period_start = cur
+                period_end = cur + timedelta(days=1)
+                rows = reports_service.fetch_between(int(period_start.timestamp()), int(period_end.timestamp()), channel_id)
+                aggs = reports_service.build_aggregates(rows)
+                text = reports_service.generate_report_text("Daily", period_start, period_end, channel_id, aggs)
+                items.append({
+                    "period": "daily",
+                    "label": period_start.strftime("%Y-%m-%d"),
+                    "channel_filter": channel_id,
+                    "counts": {k: len(aggs.get(k, [])) for k in ("decisions", "todos", "facts")},
+                    "report_text": text
+                })
+                cur = period_end
+        else:
+            # Weekly periods start on Monday (UTC)
+            # Align the cursor to the Monday of the start week
+            start_monday = start_dt - timedelta(days=start_dt.weekday())
+            cur = datetime(start_monday.year, start_monday.month, start_monday.day, tzinfo=timezone.utc)
+            final = end_dt_inclusive + timedelta(days=1)  # exclusive bound
+            while cur < final:
+                period_start = cur
+                period_end = period_start + timedelta(days=7)
+                rows = reports_service.fetch_between(int(period_start.timestamp()), int(period_end.timestamp()), channel_id)
+                aggs = reports_service.build_aggregates(rows)
+                text = reports_service.generate_report_text("Weekly", period_start, period_end, channel_id, aggs)
+                items.append({
+                    "period": "weekly",
+                    "label": period_start.strftime("%Y-%m-%d"),  # Monday label
+                    "channel_filter": channel_id,
+                    "counts": {k: len(aggs.get(k, [])) for k in ("decisions", "todos", "facts")},
+                    "report_text": text
+                })
+                cur = period_end
+
+        return jsonify({"status": "ok", "items": items})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@dashboard_api.get("/reports/export.csv")
+@require_dashboard_role("viewer", "user", "admin")
+def dashboard_reports_export_csv():
+    """
+    Export a single period as CSV.
+    Query params:
+      - granularity: "daily" or "weekly"
+      - date: YYYY-MM-DD  (for daily: the day; for weekly: Monday of the week)
+      - channel_id: optional
+    """
+    try:
+        import io, csv
+
+        granularity = (request.args.get("granularity") or "daily").lower()
+        date_str = request.args.get("date")
+        channel_id = request.args.get("channel_id")
+
+        if granularity not in ("daily", "weekly"):
+            return jsonify({"error": "granularity must be 'daily' or 'weekly'"}), 400
+        if not date_str:
+            return jsonify({"error": "date (YYYY-MM-DD) is required"}), 400
+
+        try:
+            start = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+
+        if granularity == "daily":
+            end = start + timedelta(days=1)
+            label = "Daily"
+            start_label = start.strftime("%Y-%m-%d")
+            end_label = (end - timedelta(seconds=1)).strftime("%Y-%m-%d")
+        else:
+            # Treat given date as the week start (Monday)
+            week_monday = start - timedelta(days=start.weekday())
+            start = datetime(week_monday.year, week_monday.month, week_monday.day, tzinfo=timezone.utc)
+            end = start + timedelta(days=7)
+            label = "Weekly"
+            start_label = start.strftime("%Y-%m-%d")
+            end_label = (end - timedelta(seconds=1)).strftime("%Y-%m-%d")
+
+        rows = reports_service.fetch_between(int(start.timestamp()), int(end.timestamp()), channel_id)
+        aggs = reports_service.build_aggregates(rows)
+
+        # Build CSV
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["Period", "Start", "End", "Channel", "Type", "Item"])
+        for t in ("decisions", "todos", "facts"):
+            for item in aggs.get(t, []):
+                writer.writerow([label, start_label, end_label, channel_id or "", t, item])
+
+        csv_bytes = buf.getvalue()
+        resp = app.response_class(csv_bytes, mimetype="text/csv")
+        safe_date = start_label
+        resp.headers["Content-Disposition"] = f'attachment; filename=report_{label.lower()}_{safe_date}.csv'
+        return resp
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# ---------------------------
+# SOP Library (list/create/edit/delete)
+# ---------------------------
+
+def _ensure_sops_table(conn):
+    cur = conn.cursor()
+    cur.execute("""
+      CREATE TABLE IF NOT EXISTS sops (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER,
+        topic TEXT NOT NULL,
+        channel_id TEXT,
+        tags TEXT,
+        author_user_id TEXT,
+        version TEXT,
+        status TEXT,
+        sop_text TEXT NOT NULL
+      )
+    """)
+    conn.commit()
+
+@dashboard_api.get("/sops")
+@require_dashboard_role("viewer", "user", "admin")
+def sops_list():
+    q = (request.args.get("q") or "").strip()
+    status = (request.args.get("status") or "").strip()
+    try:
+        conn = reports_service._connect()
+        _ensure_sops_table(conn)
+        cur = conn.cursor()
+        if q and status:
+            cur.execute("""
+                SELECT * FROM sops
+                WHERE (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?)
+                AND status = ?
+                ORDER BY created_at DESC
+                LIMIT 200
+            """, (f"%{q}%", f"%{q}%", f"%{q}%", status))
+        elif q:
+            cur.execute("""
+                SELECT * FROM sops
+                WHERE topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?
+                ORDER BY created_at DESC
+                LIMIT 200
+            """, (f"%{q}%", f"%{q}%", f"%{q}%"))
+        elif status:
+            cur.execute("""
+                SELECT * FROM sops
+                WHERE status = ?
+                ORDER BY created_at DESC
+                LIMIT 200
+            """, (status,))
+        else:
+            cur.execute("""SELECT * FROM sops ORDER BY created_at DESC LIMIT 200""")
+        rows = cur.fetchall()
+        conn.close()
+        items = [{
+            "id": r["id"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+            "topic": r["topic"],
+            "channel_id": r["channel_id"],
+            "tags": r["tags"],
+            "author_user_id": r["author_user_id"],
+            "version": r["version"],
+            "status": r["status"],
+            "sop_text": r["sop_text"],
+        } for r in rows]
+        return jsonify({"status":"ok","items":items})
+    except Exception as e:
+        return jsonify({"status":"error","error":str(e)}), 500
+
+@dashboard_api.post("/sops")
+@require_dashboard_role("user", "admin")
+def sops_create():
+    payload = request.get_json() or {}
+    topic = (payload.get("topic") or "").strip()
+    if not topic:
+        return jsonify({"error":"topic is required"}), 400
+    channel_id = (payload.get("channel_id") or "").strip() or None
+    tags = (payload.get("tags") or "").strip()
+    author_user_id = (payload.get("author_user_id") or "").strip()
+    version = (payload.get("version") or "v1").strip()
+    status = (payload.get("status") or "active").strip()
+    generate = bool(payload.get("generate", False))
+    days = payload.get("days")
+
+    try:
+        if generate:
+            # Use existing SOP generator logic (no posting)
+            res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
+            sop_text = res["sop_text"]
+        else:
+            sop_text = (payload.get("sop_text") or "").strip()
+            if not sop_text:
+                return jsonify({"error":"sop_text required when generate=false"}), 400
+
+        now_ts = int(time.time())
+        conn = reports_service._connect()
+        _ensure_sops_table(conn)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO sops (created_at, updated_at, topic, channel_id, tags, author_user_id, version, status, sop_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (now_ts, now_ts, topic, channel_id, tags, author_user_id, version, status, sop_text))
+        sop_id = cur.lastrowid
+        conn.commit(); conn.close()
+        return jsonify({"status":"ok","id": sop_id})
+    except Exception as e:
+        return jsonify({"status":"error","error":str(e)}), 500
+
+@dashboard_api.put("/sops/<int:sop_id>")
+@require_dashboard_role("user", "admin")
+def sops_update(sop_id: int):
+    payload = request.get_json() or {}
+    fields, values = [], []
+    for key in ("topic","channel_id","tags","author_user_id","version","status","sop_text"):
+        if key in payload:
+            fields.append(f"{key}=?")
+            values.append(payload[key])
+    if not fields:
+        return jsonify({"error":"no fields to update"}), 400
+
+    try:
+        conn = reports_service._connect()
+        _ensure_sops_table(conn)
+        cur = conn.cursor()
+        values.append(int(time.time()))
+        values.append(sop_id)
+        cur.execute(f"UPDATE sops SET {', '.join(fields)}, updated_at=? WHERE id=?", values)
+        conn.commit(); conn.close()
+        return jsonify({"status":"ok"})
+    except Exception as e:
+        return jsonify({"status":"error","error":str(e)}), 500
+
+@dashboard_api.delete("/sops/<int:sop_id>")
+@require_dashboard_role("admin")
+def sops_delete(sop_id: int):
+    try:
+        conn = reports_service._connect()
+        _ensure_sops_table(conn)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM sops WHERE id=?", (sop_id,))
+        conn.commit(); conn.close()
+        return jsonify({"status":"ok"})
+    except Exception as e:
+        return jsonify({"status":"error","error":str(e)}), 500
+
+# ---------------------------
+# Summaries Archive (search/filter/create)
+# ---------------------------
+
+def _ensure_summaries_table(conn):
+    cur = conn.cursor()
+    cur.execute("""
+      CREATE TABLE IF NOT EXISTS summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER,
+        -- window captured for the summary
+        period_start INTEGER,
+        period_end INTEGER,
+        -- quick label fields
+        date TEXT,
+        channel_id TEXT,
+        author_user_id TEXT,
+        title TEXT NOT NULL,
+        summary_text TEXT NOT NULL,
+        tags TEXT,
+        status TEXT
+      )
+    """)
+    conn.commit()
+
+def _generate_summary_text(title: str, start_dt: datetime, end_dt: datetime, channel_id: str | None) -> str:
+    """
+    Generates a concise summary using the existing insights:
+      - If Groq is configured, ask for a prose summary
+      - Otherwise, produce a deterministic bullet summary from aggregates
+    """
+    rows = reports_service.fetch_between(int(start_dt.timestamp()), int(end_dt.timestamp()), channel_id)
+    aggs = reports_service.build_aggregates(rows)
+
+    # Try LLM first if available
+    if groq_client:
+        decisions = "\n".join(f"- {x}" for x in (aggs.get("decisions") or [])[:15]) or "- (none)"
+        todos = "\n".join(f"- {x}" for x in (aggs.get("todos") or [])[:15]) or "- (none)"
+        facts = "\n".join(f"- {x}" for x in (aggs.get("facts") or [])[:15]) or "- (none)"
+        prompt = f"""
+You are an expert note-taker. Write a concise, executive-friendly summary (120–180 words)
+for the window {start_dt.strftime('%Y-%m-%d')} → {(end_dt - timedelta(seconds=1)).strftime('%Y-%m-%d')} UTC
+{f'for Slack channel <#{channel_id}>' if channel_id else ''} titled: "{title}".
+
+Ground ONLY in these items. Prefer synthesis over copying.
+
+Decisions:
+{decisions}
+
+To-Dos:
+{todos}
+
+Facts:
+{facts}
+
+Output plain text suitable for Slack (no headers, no JSON).
+"""
+        try:
+            resp = groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model=GROQ_MODEL,
+                temperature=0.2,
+                max_tokens=400,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            if text:
+                return text
+        except Exception as _e:
+            pass  # fall back to deterministic summary
+
+    # Deterministic fallback (no LLM)
+    lines = []
+    lines.append(f"{title} — Summary ({start_dt.strftime('%Y-%m-%d')} → {(end_dt - timedelta(seconds=1)).strftime('%Y-%m-%d')} UTC){f' — Channel: #{channel_id}' if channel_id else ''}")
+    lines.append("")
+    if aggs.get("decisions"):
+        lines.append(f"Decisions ({len(aggs['decisions'])}):")
+        lines.extend([f"- {x}" for x in aggs["decisions"][:10]])
+        lines.append("")
+    if aggs.get("todos"):
+        lines.append(f"To-Dos ({len(aggs['todos'])}):")
+        lines.extend([f"- {x}" for x in aggs["todos"][:10]])
+        lines.append("")
+    if aggs.get("facts"):
+        lines.append(f"Facts ({len(aggs['facts'])}):")
+        lines.extend([f"- {x}" for x in aggs["facts"][:10]])
+        lines.append("")
+    if not any(aggs.get(k) for k in ("decisions","todos","facts")):
+        lines.append("_No insights collected for this window._")
+    return "\n".join(lines)
+
+
+@dashboard_api.get("/summaries")
+@require_dashboard_role("viewer", "user", "admin")
+def summaries_list():
+    """
+    Search/filter the summaries archive.
+    Query params:
+      - q: free-text search in title/tags/summary_text
+      - status: filter by status (e.g., draft|active|archived)
+      - channel_id: optional filter
+      - start: YYYY-MM-DD (filter by period_start >= start)
+      - end: YYYY-MM-DD (filter by period_start < end+1 day)
+      - limit: max rows (default 100)
+    """
+    try:
+        q = (request.args.get("q") or "").strip()
+        status = (request.args.get("status") or "").strip()
+        channel_id = (request.args.get("channel_id") or "").strip()
+        start_str = request.args.get("start")
+        end_str = request.args.get("end")
+        limit = max(1, min(500, int(request.args.get("limit") or "100")))
+
+        start_ts = end_ts = None
+        if start_str:
+            try:
+                start_dt = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                start_ts = int(start_dt.timestamp())
+            except ValueError:
+                return jsonify({"error": "Invalid 'start' format. Use YYYY-MM-DD"}), 400
+        if end_str:
+            try:
+                end_dt = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+                end_ts = int(end_dt.timestamp())  # exclusive
+            except ValueError:
+                return jsonify({"error": "Invalid 'end' format. Use YYYY-MM-DD"}), 400
+
+        conn = reports_service._connect()
+        _ensure_summaries_table(conn)
+        cur = conn.cursor()
+
+        sql = "SELECT * FROM summaries WHERE 1=1"
+        params = []
+
+        if q:
+            sql += " AND (title LIKE ? OR tags LIKE ? OR summary_text LIKE ?)"
+            like = f"%{q}%"
+            params.extend([like, like, like])
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        if channel_id:
+            sql += " AND channel_id = ?"
+            params.append(channel_id)
+        if start_ts is not None:
+            sql += " AND (period_start IS NULL OR period_start >= ?)"
+            params.append(start_ts)
+        if end_ts is not None:
+            sql += " AND (period_start IS NULL OR period_start < ?)"
+            params.append(end_ts)
+
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+        conn.close()
+
+        items = [{
+            "id": r["id"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+            "period_start": r["period_start"],
+            "period_end": r["period_end"],
+            "date": r["date"],
+            "channel_id": r["channel_id"],
+            "author_user_id": r["author_user_id"],
+            "title": r["title"],
+            "tags": r["tags"],
+            "status": r["status"],
+            "summary_text": r["summary_text"],
+        } for r in rows]
+
+        return jsonify({"status":"ok","items":items})
+    except Exception as e:
+        return jsonify({"status":"error","error":str(e)}), 500
+
+
+@dashboard_api.post("/summaries")
+@require_dashboard_role("user", "admin")
+def summaries_create():
+    """
+    Create a summary.
+    JSON body:
+      - title: required
+      - channel_id: optional
+      - tags: optional
+      - status: optional (default: active)
+      - author_user_id: optional
+      EITHER:
+        - generate: true, with start, end (YYYY-MM-DD), optional channel_id
+      OR
+        - generate: false (default), with summary_text (required)
+    """
+    try:
+        payload = request.get_json() or {}
+        title = (payload.get("title") or "").strip()
+        if not title:
+            return jsonify({"error":"title is required"}), 400
+
+        channel_id = (payload.get("channel_id") or "").strip() or None
+        tags = (payload.get("tags") or "").strip()
+        status = (payload.get("status") or "active").strip()
+        author_user_id = (payload.get("author_user_id") or "").strip()
+        generate = bool(payload.get("generate", False))
+
+        period_start_ts = period_end_ts = None
+        date_label = None
+
+        if generate:
+            start_str = payload.get("start")
+            end_str = payload.get("end")
+            if not start_str or not end_str:
+                return jsonify({"error":"start and end (YYYY-MM-DD) are required when generate=true"}), 400
+            try:
+                start_dt = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                end_dt = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+            except ValueError:
+                return jsonify({"error": "Invalid date format. Use YYYY-MM-DD"}), 400
+
+            date_label = start_dt.strftime("%Y-%m-%d")
+            period_start_ts = int(start_dt.timestamp())
+            period_end_ts = int(end_dt.timestamp())
+            summary_text = _generate_summary_text(title, start_dt, end_dt, channel_id)
+        else:
+            summary_text = (payload.get("summary_text") or "").strip()
+            if not summary_text:
+                return jsonify({"error":"summary_text is required when generate=false"}), 400
+
+        now_ts = int(time.time())
+        conn = reports_service._connect()
+        _ensure_summaries_table(conn)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO summaries (
+                created_at, updated_at, period_start, period_end, date, channel_id,
+                author_user_id, title, summary_text, tags, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            now_ts, now_ts, period_start_ts, period_end_ts, date_label, channel_id,
+            author_user_id, title, summary_text, tags, status
+        ))
+        sid = cur.lastrowid
+        conn.commit()
+        conn.close()
+
+        return jsonify({"status":"ok","id":sid})
+    except Exception as e:
+        return jsonify({"status":"error","error":str(e)}), 500
+
+# ---------------------------
+# Global Search (insights + sops + summaries)
+# ---------------------------
+
+@dashboard_api.get("/search")
+@require_dashboard_role("viewer", "user", "admin")
+def dashboard_global_search():
+    """
+    Unified search across insights, SOPs, and summaries.
+
+    Query params:
+      - q: free-text query (optional)
+      - types: comma-separated subset of insights,sops,summaries (default: all)
+      - channel_id: optional filter applied where available
+      - status: optional filter (applies to sops/summaries only)
+      - start: YYYY-MM-DD (filters by created_at/period_start >= start)
+      - end: YYYY-MM-DD (filters by created_at/period_start < end+1 day)
+      - limit: cap combined results (default 100, max 200)
+
+    Response:
+      { status: "ok", items: [ {type, id, title, text, channel_id, tags, status, date, created_at, ...}, ... ] }
+    """
+    try:
+        q = (request.args.get("q") or "").strip()
+        types_raw = (request.args.get("types") or "insights,sops,summaries").lower()
+        types = {t.strip() for t in types_raw.split(",") if t.strip()}
+        if not types:
+            types = {"insights", "sops", "summaries"}
+
+        channel_id = (request.args.get("channel_id") or "").strip() or None
+        status = (request.args.get("status") or "").strip() or None
+        start_str = request.args.get("start")
+        end_str = request.args.get("end")
+        limit = max(1, min(200, int(request.args.get("limit") or "100")))
+
+        # Parse date filters
+        start_ts = end_ts = None
+        if start_str:
+            try:
+                sdt = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                start_ts = int(sdt.timestamp())
+            except ValueError:
+                return jsonify({"error": "Invalid 'start' format. Use YYYY-MM-DD"}), 400
+        if end_str:
+            try:
+                edt = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+                end_ts = int(edt.timestamp())  # exclusive
+            except ValueError:
+                return jsonify({"error": "Invalid 'end' format. Use YYYY-MM-DD"}), 400
+
+        conn = reports_service._connect()
+        # Ensure tables exist (no-op if already created)
+        try:
+            _ensure_sops_table(conn)
+        except Exception:
+            pass
+        try:
+            _ensure_summaries_table(conn)
+        except Exception:
+            pass
+
+        cur = conn.cursor()
+        items = []
+
+        # ---- Insights ----
+        if "insights" in types:
+            sql = """
+              SELECT id, created_at, date, channel_id, decisions, todos, facts, message_text
+              FROM insights
+              WHERE 1=1
+            """
+            params = []
+            if q:
+                like = f"%{q}%"
+                sql += " AND (message_text LIKE ? OR decisions LIKE ? OR todos LIKE ? OR facts LIKE ?)"
+                params.extend([like, like, like, like])
+            if channel_id:
+                sql += " AND channel_id = ?"
+                params.append(channel_id)
+            if start_ts is not None:
+                sql += " AND created_at >= ?"
+                params.append(start_ts)
+            if end_ts is not None:
+                sql += " AND created_at < ?"
+                params.append(end_ts)
+            sql += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+
+            import json as _json
+            for r in rows:
+                # Build a compact preview from decisions/todos/facts or fallback to message_text
+                preview_lines = []
+                try:
+                    ds = _json.loads(r["decisions"] or "[]")[:3]
+                except Exception:
+                    ds = []
+                try:
+                    ts_ = _json.loads(r["todos"] or "[]")[:3]
+                except Exception:
+                    ts_ = []
+                try:
+                    fs = _json.loads(r["facts"] or "[]")[:3]
+                except Exception:
+                    fs = []
+
+                for col in (ds, ts_, fs):
+                    for x in col:
+                        if x:
+                            preview_lines.append(f"- {x}")
+                text_preview = "\n".join(preview_lines) or (r["message_text"] or "")[:500]
+
+                items.append({
+                    "type": "insight",
+                    "id": r["id"],
+                    "title": f"Insights {r['date']}",
+                    "text": text_preview,
+                    "channel_id": r["channel_id"],
+                    "tags": None,
+                    "status": None,
+                    "date": r["date"],
+                    "created_at": r["created_at"],
+                })
+
+        # ---- SOPs ----
+        if "sops" in types:
+            sql = """
+              SELECT id, created_at, topic AS title, channel_id, tags, status, sop_text
+              FROM sops
+              WHERE 1=1
+            """
+            params = []
+            if q:
+                like = f"%{q}%"
+                sql += " AND (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?)"
+                params.extend([like, like, like])
+            if channel_id:
+                sql += " AND channel_id = ?"
+                params.append(channel_id)
+            if status:
+                sql += " AND status = ?"
+                params.append(status)
+            # created_at window (if provided)
+            if start_ts is not None:
+                sql += " AND created_at >= ?"
+                params.append(start_ts)
+            if end_ts is not None:
+                sql += " AND created_at < ?"
+                params.append(end_ts)
+
+            sql += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+            for r in rows:
+                items.append({
+                    "type": "sop",
+                    "id": r["id"],
+                    "title": r["title"],
+                    "text": (r["sop_text"] or "")[:1000],
+                    "channel_id": r["channel_id"],
+                    "tags": r["tags"],
+                    "status": r["status"],
+                    "date": None,
+                    "created_at": r["created_at"],
+                })
+
+        # ---- Summaries ----
+        if "summaries" in types:
+            sql = """
+              SELECT id, created_at, title, channel_id, tags, status,
+                     summary_text, period_start, period_end, date
+              FROM summaries
+              WHERE 1=1
+            """
+            params = []
+            if q:
+                like = f"%{q}%"
+                sql += " AND (title LIKE ? OR tags LIKE ? OR summary_text LIKE ?)"
+                params.extend([like, like, like])
+            if channel_id:
+                sql += " AND channel_id = ?"
+                params.append(channel_id)
+            if status:
+                sql += " AND status = ?"
+                params.append(status)
+            # Prefer filtering by window start if present, else fallback to created_at
+            if start_ts is not None:
+                sql += " AND (period_start IS NULL OR period_start >= ?)"
+                params.append(start_ts)
+            if end_ts is not None:
+                sql += " AND (period_start IS NULL OR period_start < ?)"
+                params.append(end_ts)
+
+            sql += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall()
+            for r in rows:
+                items.append({
+                    "type": "summary",
+                    "id": r["id"],
+                    "title": r["title"],
+                    "text": (r["summary_text"] or "")[:1000],
+                    "channel_id": r["channel_id"],
+                    "tags": r["tags"],
+                    "status": r["status"],
+                    "date": r["date"],
+                    "created_at": r["created_at"],
+                    "period_start": r["period_start"],
+                    "period_end": r["period_end"],
+                })
+
+        conn.close()
+
+        # Combine + sort + cap
+        items.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+        if len(items) > limit:
+            items = items[:limit]
+
+        return jsonify({"status": "ok", "items": items})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+# ---------------------------
+# Auth helper: who am I? (role)
+# ---------------------------
+@dashboard_api.get("/auth/me")
+@require_dashboard_role("viewer","user","admin")
+def auth_me():
+    tok = _extract_token_from_request(request)
+    role = resolve_dashboard_role_from_token(tok) or "none"
+    return jsonify({"status": "ok", "role": role})
+
+# Register the Dashboard API under /dashboard/api
+app.register_blueprint(dashboard_api, url_prefix="/dashboard/api")
+
+
+
 
 # ---------------------------
 # Health + Root Endpoints
@@ -748,6 +1741,24 @@ def test_slack():
         })
     else:
         return jsonify({'error': 'No TARGET_CHANNEL_ID configured'})
+
+
+# ---------------------------
+# Dashboard (static shell)
+# ---------------------------
+
+DASHBOARD_DIR = os.path.join(os.path.dirname(__file__), "dashboard_static")
+
+@app.get("/dashboard")
+def dashboard_index():
+    # Serves the minimal dashboard shell (no data yet)
+    return send_from_directory(DASHBOARD_DIR, "index.html")
+
+@app.get("/dashboard/static/<path:filename>")
+def dashboard_static(filename):
+    return send_from_directory(DASHBOARD_DIR, filename)
+
+
 
 
 # ---------------------------

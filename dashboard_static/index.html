@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AI Shadow Coach — Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="/dashboard/static/app.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="nav">
+        <h1>AI Shadow Coach</h1>
+        <button class="active">Overview</button>
+        <button>Activities</button>
+        <button>Reports</button>
+        <button>SOP Library</button>
+        <button>Summaries</button>
+        <button>Settings</button>
+      </aside>
+
+      <main class="main">
+        <section class="panel">
+          <h2>Welcome</h2>
+          <p>This is the dashboard shell. Data wiring will be added in the next steps.</p>
+        </section>
+
+        <section class="grid">
+          <div class="stat">
+            <div class="badge">Reports</div>
+            <div class="stat-num">0 today</div>
+            <div class="muted">0 this week</div>
+          </div>
+          <div class="stat">
+            <div class="badge">SOPs</div>
+            <div class="stat-num">0 today</div>
+            <div class="muted">0 this week</div>
+          </div>
+          <div class="stat">
+            <div class="badge">Summaries</div>
+            <div class="stat-num">0 today</div>
+            <div class="muted">0 this week</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Recent Activities</h2>
+          <p class="muted">No activities yet. This feed will populate in Step 2+.</p>
+        </section>
+      </main>
+    </div>
+
+    <script src="/dashboard/static/app.js"></script>
+  </body>
+</html>
+
+<!-- Reports (new) -->
+<section class="panel" id="reports-panel">
+  <h2>Reports</h2>
+  <div class="grid">
+    <div>
+      <label>Granularity</label>
+      <select id="rep-granularity">
+        <option value="daily" selected>Daily</option>
+        <option value="weekly">Weekly</option>
+      </select>
+    </div>
+    <div>
+      <label>Start (YYYY-MM-DD)</label>
+      <input id="rep-start" placeholder="YYYY-MM-DD" />
+    </div>
+    <div>
+      <label>End (YYYY-MM-DD)</label>
+      <input id="rep-end" placeholder="YYYY-MM-DD" />
+    </div>
+    <div>
+      <label>Channel (optional)</label>
+      <input id="rep-channel" placeholder="C0123456789" />
+    </div>
+  </div>
+  <div class="actions" style="margin-top:12px">
+    <button class="primary" id="rep-fetch-btn">Fetch</button>
+  </div>
+  <div id="rep-results" style="margin-top:12px"></div>
+</section>
+
+<!-- Settings (token) -->
+<section class="panel" id="settings-panel">
+  <h2>Settings</h2>
+  <p>Paste your X-Auth-Token for the Dashboard API.</p>
+  <input id="token-input" placeholder="X-Auth-Token" />
+  <div class="actions" style="margin-top:12px">
+    <button class="primary" id="token-save-btn">Save Token</button>
+  </div>
+  <p class="muted" id="token-status"></p>
+</section>
+
+<section class="panel" id="sops-panel">
+  <h2>SOP Library</h2>
+
+  <div class="grid">
+    <div class="searchbar" style="grid-column:1/-1">
+      <input id="sop-q" placeholder="Search by topic, tag, or text..." />
+      <select id="sop-status">
+        <option value="">All statuses</option>
+        <option value="active">active</option>
+        <option value="draft">draft</option>
+        <option value="deprecated">deprecated</option>
+      </select>
+      <button class="ghost" id="sop-search-btn">Search</button>
+    </div>
+
+    <div>
+      <label>Topic</label>
+      <input id="sop-topic" placeholder="e.g., incident response runbook" />
+    </div>
+    <div>
+      <label>Channel (optional)</label>
+      <input id="sop-channel" placeholder="C0123456789" />
+    </div>
+    <div>
+      <label>Tags (comma separated)</label>
+      <input id="sop-tags" placeholder="ops, onboarding" />
+    </div>
+    <div>
+      <label>Generate from context?</label>
+      <select id="sop-generate">
+        <option value="true">Yes</option>
+        <option value="false">No (manual text below)</option>
+      </select>
+    </div>
+    <div id="sop-days-wrap">
+      <label>Days window</label>
+      <input id="sop-days" value="14" />
+    </div>
+    <div id="sop-text-wrap" style="grid-column:1/-1; display:none">
+      <label>SOP Text</label>
+      <textarea id="sop-text" rows="8" placeholder="Paste SOP text if not generating"></textarea>
+    </div>
+  </div>
+
+  <div class="actions" style="margin-top:12px">
+    <button class="primary" id="sop-save-btn" data-requires-role="user">Save SOP</button>
+  </div>
+
+  <div style="margin-top:16px">
+    <table>
+      <thead>
+        <tr>
+          <th>Topic</th>
+          <th>Tags</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="sop-list"></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="summaries-panel">
+  <h2>Summaries Archive</h2>
+
+  <div class="grid">
+    <div class="searchbar" style="grid-column:1/-1">
+      <input id="sum-q" placeholder="Search by title, tag, or text..." />
+      <input id="sum-channel" placeholder="Channel (optional)" />
+      <select id="sum-status">
+        <option value="">All statuses</option>
+        <option value="active">active</option>
+        <option value="draft">draft</option>
+        <option value="archived">archived</option>
+      </select>
+      <input id="sum-start" placeholder="Start YYYY-MM-DD" />
+      <input id="sum-end" placeholder="End YYYY-MM-DD" />
+      <button class="ghost" id="sum-search-btn">Search</button>
+    </div>
+
+    <div style="grid-column:1/-1">
+      <h3>Create Summary</h3>
+    </div>
+    <div>
+      <label>Title</label>
+      <input id="sum-title" placeholder="e.g., Sprint 42 recap" />
+    </div>
+    <div>
+      <label>Channel (optional)</label>
+      <input id="sum-create-channel" placeholder="C0123456789" />
+    </div>
+    <div>
+      <label>Tags</label>
+      <input id="sum-tags" placeholder="recap, release" />
+    </div>
+    <div>
+      <label>Generate from insights?</label>
+      <select id="sum-generate">
+        <option value="true">Yes (date range below)</option>
+        <option value="false">No (paste text)</option>
+      </select>
+    </div>
+    <div id="sum-win-wrap">
+      <label>Window Start</label>
+      <input id="sum-start-create" placeholder="YYYY-MM-DD" />
+      <label style="margin-left:8px">Window End</label>
+      <input id="sum-end-create" placeholder="YYYY-MM-DD" />
+    </div>
+    <div id="sum-text-wrap" style="grid-column:1/-1; display:none">
+      <label>Summary Text</label>
+      <textarea id="sum-text" rows="8" placeholder="Paste your summary if not generating"></textarea>
+    </div>
+  </div>
+
+  <div class="actions" style="margin-top:12px">
+    <button class="primary" id="sum-save-btn" data-requires-role="user">Save Summary</button>
+  </div>
+
+  <div style="margin-top:16px">
+    <table>
+      <thead>
+        <tr>
+          <th>Title</th>
+          <th>Channel</th>
+          <th>Date/Window</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="sum-list"></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="global-search-panel">
+  <h2>Global Search</h2>
+
+  <div class="grid" style="row-gap:8px">
+    <div class="searchbar" style="grid-column:1/-1">
+      <input id="gs-q" placeholder="Search across insights, SOPs, and summaries..." />
+      <label style="margin-left:8px"><input type="checkbox" id="gs-type-insights" checked /> Insights</label>
+      <label style="margin-left:8px"><input type="checkbox" id="gs-type-sops" checked /> SOPs</label>
+      <label style="margin-left:8px"><input type="checkbox" id="gs-type-summaries" checked /> Summaries</label>
+      <button class="ghost" id="gs-search-btn" style="margin-left:8px">Search</button>
+    </div>
+
+    <div>
+      <label>Channel (optional)</label>
+      <input id="gs-channel" placeholder="C0123456789" />
+    </div>
+    <div>
+      <label>Status (SOPs/Summaries)</label>
+      <select id="gs-status">
+        <option value="">Any</option>
+        <option value="active">active</option>
+        <option value="draft">draft</option>
+        <option value="deprecated">deprecated</option>
+        <option value="archived">archived</option>
+      </select>
+    </div>
+    <div>
+      <label>Start (YYYY-MM-DD)</label>
+      <input id="gs-start" placeholder="YYYY-MM-DD" />
+    </div>
+    <div>
+      <label>End (YYYY-MM-DD)</label>
+      <input id="gs-end" placeholder="YYYY-MM-DD" />
+    </div>
+  </div>
+
+  <div id="gs-results" style="margin-top:12px"></div>
+</section>
+
+
+
+

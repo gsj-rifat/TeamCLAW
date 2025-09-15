@@ -9,6 +9,8 @@ services:
         value: 3.11.9
       - key: RENDER
         value: true
+      - key: DASHBOARD_TOKENS
+        value: '{"viewer-token":"viewer","user-token":"user","admin-token":"admin"}'
 
       # Secrets (set in Render dashboard)
       - key: GROQ_API_KEY
@@ -19,6 +21,12 @@ services:
         sync: false
       - key: TARGET_CHANNEL_ID
         sync: false
+      - key: DASHBOARD_VIEWER_TOKENS
+        value: "viewer-abc123,viewer-xyz789"
+      - key: DASHBOARD_USER_TOKENS
+        value: "user-abc123,user-xyz789"
+      - key: DASHBOARD_ADMIN_TOKENS
+        value: "admin-secret-1,admin-secret-2"
 
       # Reporting config (DB on persistent disk)
       - key: INSIGHTS_DB_PATH
