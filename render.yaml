@@ -30,7 +30,7 @@ services:
 
       # Reporting config (DB on persistent disk)
       - key: INSIGHTS_DB_PATH
-        value: /var/data/insights.db
+        value: insights.db
       - key: REPORT_POST_CHANNEL_ID
         value: ""             # fallback to TARGET_CHANNEL_ID if empty
       - key: REPORT_INCLUDE_FACTS

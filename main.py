@@ -11,8 +11,7 @@ from report_commands import SlackReportCommandHandler, SlackReportCommandsConfig
 from sop_generator import SopConfig, SopService, SlackSopCommandHandler, create_sop_blueprint
 from sop_readiness import SopReadinessService, SopReadinessConfig, create_sop_readiness_blueprint
 from datetime import datetime, timezone, timedelta
-from flask import Flask, request, jsonify, Blueprint, send_from_directory
-
+from flask import Flask, request, jsonify, Blueprint, send_from_directory, redirect
 
 app = Flask(__name__)
 # WSGI alias for gunicorn (main:application)
@@ -61,7 +60,8 @@ NOISE_TREAT_HELP_AS_SIGNAL = os.getenv('NOISE_TREAT_HELP_AS_SIGNAL', 'true').low
 # If the classifier fails, default policy: allow (meaningful) or block
 NOISE_FAILSAFE_POLICY = os.getenv('NOISE_FAILSAFE_POLICY', 'allow')  # 'allow' | 'block'
 
-
+BASE_DIR = os.path.dirname(__file__)  # /opt/render/project/src at runtime
+INSIGHTS_DB_PATH = os.getenv("INSIGHTS_DB_PATH", os.path.join(BASE_DIR, "insights.db"))
 
 # ---------------------------
 # Dashboard API Auth (X-Auth-Token)
@@ -1751,14 +1751,18 @@ def test_slack():
 
 DASHBOARD_DIR = os.path.join(os.path.dirname(__file__), "dashboard_static")
 
+@app.get("/")
+def root_redirect():
+    return redirect("/dashboard", code=302)
 @app.get("/dashboard")
 def dashboard_index():
-    # Serves the minimal dashboard shell (no data yet)
     return send_from_directory(DASHBOARD_DIR, "index.html")
-
-@app.get("/dashboard/static/<path:filename>")
-def dashboard_static(filename):
-    return send_from_directory(DASHBOARD_DIR, filename)
+@app.get("/dashboard/")
+def dashboard_index_slash():
+    return send_from_directory(DASHBOARD_DIR, "index.html")
+@app.get("/dashboard/<path:path>")
+def dashboard_assets(path):
+    return send_from_directory(DASHBOARD_DIR, path)
 
 
 
