@@ -1761,7 +1761,7 @@ def dashboard_index_no_slash():
 def dashboard_index_with_slash():
     return send_from_directory(DASHBOARD_DIR, "index.html")
 # Serve assets from /dashboard/static/<file>
-@app.get("/dashboard_static/<path:filename>")
+@app.get("/dashboard/static/<path:filename>")
 def dashboard_static(filename):
     return send_from_directory(DASHBOARD_DIR, filename)
 
