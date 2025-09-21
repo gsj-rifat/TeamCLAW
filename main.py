@@ -38,7 +38,7 @@ GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
 TARGET_CHANNEL_ID = os.getenv('TARGET_CHANNEL_ID')
-INSIGHTS_DB_PATH = os.getenv('INSIGHTS_DB_PATH', 'insights.db')
+INSIGHTS_DB_PATH = os.getenv('INSIGHTS_DB_PATH', "/var/data/insights.db")
 REPORT_POST_CHANNEL_ID = os.getenv('REPORT_POST_CHANNEL_ID', TARGET_CHANNEL_ID or '')
 REPORT_INCLUDE_FACTS = os.getenv('REPORT_INCLUDE_FACTS', 'true').lower() == 'true'
 REPORT_MAX_ITEMS = int(os.getenv('REPORT_MAX_ITEMS', '50'))
@@ -560,6 +560,8 @@ reports_service = ReportsService(
         default_post_channel_id=REPORT_POST_CHANNEL_ID or TARGET_CHANNEL_ID,
     )
 )
+
+print(f"[startup] Using DB at {INSIGHTS_DB_PATH}", flush=True)
 
 reports_bp = create_reports_blueprint(
     service=reports_service,
@@ -1724,6 +1726,70 @@ def slack_events():
 
     return jsonify({'status': 'event_ignored'})
 
+
+# --- Slack Events Ingest ---
+import time, hmac, hashlib
+from flask import request, jsonify
+from datetime import datetime, timezone
+
+def _verify_slack_request(req):
+    ts = req.headers.get("X-Slack-Request-Timestamp", "")
+    sig = req.headers.get("X-Slack-Signature", "")
+    if not ts or not sig:
+        return False
+    if abs(time.time() - int(ts)) > 300:  # 5 min replay window
+        return False
+    basestring = f"v0:{ts}:{req.get_data(as_text=True)}"
+    my_sig = "v0=" + hmac.new(
+        SLACK_SIGNING_SECRET.encode("utf-8"),
+        basestring.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(my_sig, sig)
+
+@app.post("/slack/events")
+def slack_events():
+    # url_verification handshake
+    if request.headers.get("Content-Type", "").startswith("application/json"):
+        body = request.get_json(silent=True) or {}
+        if body.get("type") == "url_verification":
+            return jsonify({"challenge": body.get("challenge")})
+
+    if not _verify_slack_request(request):
+        return jsonify({"error": "signature verification failed"}), 401
+
+    event = (request.get_json(silent=True) or {}).get("event") or {}
+    if event.get("type") == "message" and not event.get("subtype"):
+        try:
+            channel_id = event.get("channel")
+            user_id = event.get("user")
+            text = event.get("text") or ""
+            ts = event.get("ts")
+            created_at = int(float(ts)) if ts else int(time.time())
+            date_str = datetime.fromtimestamp(created_at, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
+            decisions, todos, facts = [], [], []
+            # If your extractor returns empty arrays frequently, fall back to storing raw text
+            if text and not (decisions or todos or facts):
+                facts = [text]
+
+            # Persist to SQLite so the dashboard can read it
+            reports_service.save_insights(
+                created_at=created_at,
+                date=date_str,
+                channel_id=channel_id,
+                user_id=user_id,
+                decisions=decisions,
+                todos=todos,
+                facts=facts,
+                message_text=text,
+            )
+            print(f"[ingest] Saved insight @ {date_str} to {INSIGHTS_DB_PATH} (channel={channel_id})", flush=True)
+        except Exception as e:
+            print("Ingest error:", e, flush=True)
+
+    return jsonify({"ok": True})
 
 # ---------------------------
 # Test Endpoint (Existing)
