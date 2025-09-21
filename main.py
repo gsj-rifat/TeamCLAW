@@ -1749,20 +1749,21 @@ def test_slack():
 # Dashboard (static shell)
 # ---------------------------
 
-DASHBOARD_DIR = os.path.join(os.path.dirname(__file__), "dashboard_static")
+DASHBOARD_DIR = os.path.join(BASE_DIR, "dashboard_static")
 
 @app.get("/")
 def root_redirect():
     return redirect("/dashboard", code=302)
 @app.get("/dashboard")
-def dashboard_index():
+def dashboard_index_no_slash():
     return send_from_directory(DASHBOARD_DIR, "index.html")
 @app.get("/dashboard/")
-def dashboard_index_slash():
+def dashboard_index_with_slash():
     return send_from_directory(DASHBOARD_DIR, "index.html")
-@app.get("/dashboard/<path:path>")
-def dashboard_assets(path):
-    return send_from_directory(DASHBOARD_DIR, path)
+# Serve assets from /dashboard/static/<file>
+@app.get("/dashboard_static/<path:filename>")
+def dashboard_static(filename):
+    return send_from_directory(DASHBOARD_DIR, filename)
 
 
 
