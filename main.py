@@ -1593,8 +1593,10 @@ def dashboard_global_search():
 @dashboard_api.get("/auth/me")
 @require_dashboard_role("viewer","user","admin")
 def auth_me():
-    tok = _extract_token_from_request(request)
-    role = resolve_dashboard_role_from_token(tok) or "none"
+    #tok = _extract_token_from_request(request)
+    #role = resolve_dashboard_role_from_token(tok) or "none"
+    #return jsonify({"status": "ok", "role": role})
+    role = current_role()  # returns DEFAULT_PUBLIC_ROLE when public mode is on
     return jsonify({"status": "ok", "role": role})
 
 # Register the Dashboard API under /dashboard/api
