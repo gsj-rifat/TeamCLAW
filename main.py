@@ -11,7 +11,7 @@ from report_commands import SlackReportCommandHandler, SlackReportCommandsConfig
 from sop_generator import SopConfig, SopService, SlackSopCommandHandler, create_sop_blueprint
 from sop_readiness import SopReadinessService, SopReadinessConfig, create_sop_readiness_blueprint
 from datetime import datetime, timezone, timedelta
-from flask import Flask, request, jsonify, Blueprint, send_from_directory, redirect
+from flask import Flask, request, jsonify, Blueprint, send_from_directory, redirect, abort
 
 app = Flask(__name__)
 # WSGI alias for gunicorn (main:application)
@@ -62,6 +62,41 @@ NOISE_FAILSAFE_POLICY = os.getenv('NOISE_FAILSAFE_POLICY', 'allow')  # 'allow' |
 
 BASE_DIR = os.path.dirname(__file__)  # /opt/render/project/src at runtime
 INSIGHTS_DB_PATH = os.getenv("INSIGHTS_DB_PATH", os.path.join(BASE_DIR, "insights.db"))
+
+
+DISABLE_DASHBOARD_AUTH = os.getenv("DISABLE_DASHBOARD_AUTH", "true").lower() in ("1", "true", "yes")
+DEFAULT_PUBLIC_ROLE = os.getenv("DEFAULT_PUBLIC_ROLE", "admin")  # or "admin" if you want full access
+ROLE_LEVEL = {"viewer": 1, "user": 2, "admin": 3}
+
+def current_role():
+    # Public mode: no token required
+    if DISABLE_DASHBOARD_AUTH:
+        return DEFAULT_PUBLIC_ROLE
+
+    # Token mode (kept for future if you re-enable)
+    token = request.headers.get("X-Auth-Token", "").strip()
+    viewer = set(os.getenv("DASHBOARD_VIEWER_TOKENS", "").split(",")) if os.getenv("DASHBOARD_VIEWER_TOKENS") else set()
+    user = set(os.getenv("DASHBOARD_USER_TOKENS", "").split(",")) if os.getenv("DASHBOARD_USER_TOKENS") else set()
+    admin = set(os.getenv("DASHBOARD_ADMIN_TOKENS", "").split(",")) if os.getenv("DASHBOARD_ADMIN_TOKENS") else set()
+    if token in admin:
+        return "admin"
+    if token in user:
+        return "user"
+    if token in viewer:
+        return "viewer"
+    abort(401)
+
+def require_role(min_role="viewer"):
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            role = current_role()
+            if ROLE_LEVEL[role] < ROLE_LEVEL[min_role]:
+                abort(403)
+            # Optionally: attach role to request context if you use it
+            return fn(*args, **kwargs)
+        wrapper.__name__ = fn.__name__
+        return wrapper
+    return decorator
 
 # ---------------------------
 # Dashboard API Auth (X-Auth-Token)
