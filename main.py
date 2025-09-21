@@ -38,7 +38,7 @@ GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
 TARGET_CHANNEL_ID = os.getenv('TARGET_CHANNEL_ID')
-INSIGHTS_DB_PATH = os.getenv('INSIGHTS_DB_PATH', "/var/data/insights.db")
+INSIGHTS_DB_PATH = os.getenv('INSIGHTS_DB_PATH', insights.db)
 REPORT_POST_CHANNEL_ID = os.getenv('REPORT_POST_CHANNEL_ID', TARGET_CHANNEL_ID or '')
 REPORT_INCLUDE_FACTS = os.getenv('REPORT_INCLUDE_FACTS', 'true').lower() == 'true'
 REPORT_MAX_ITEMS = int(os.getenv('REPORT_MAX_ITEMS', '50'))
