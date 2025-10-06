@@ -68,35 +68,30 @@ DISABLE_DASHBOARD_AUTH = os.getenv("DISABLE_DASHBOARD_AUTH", "true").lower() in 
 DEFAULT_PUBLIC_ROLE = os.getenv("DEFAULT_PUBLIC_ROLE", "admin")  # or "admin" if you want full access
 ROLE_LEVEL = {"viewer": 1, "user": 2, "admin": 3}
 
+
+# Role resolution no longer used; kept only to satisfy references
 def current_role():
-    # Public mode: no token required
-    if DISABLE_DASHBOARD_AUTH:
-        return DEFAULT_PUBLIC_ROLE
-
-    # Token mode (kept for future if you re-enable)
-    token = request.headers.get("X-Auth-Token", "").strip()
-    viewer = set(os.getenv("DASHBOARD_VIEWER_TOKENS", "").split(",")) if os.getenv("DASHBOARD_VIEWER_TOKENS") else set()
-    user = set(os.getenv("DASHBOARD_USER_TOKENS", "").split(",")) if os.getenv("DASHBOARD_USER_TOKENS") else set()
-    admin = set(os.getenv("DASHBOARD_ADMIN_TOKENS", "").split(",")) if os.getenv("DASHBOARD_ADMIN_TOKENS") else set()
-    if token in admin:
-        return "admin"
-    if token in user:
-        return "user"
-    if token in viewer:
-        return "viewer"
-    abort(401)
-
-def require_role(min_role="viewer"):
+    # Unified public mode; not actually used for access control
+    return "public"
+# No-op decorator supporting all usages:
+# - @require_role
+# - @require_role()
+# - @require_role("viewer"/"user"/"admin")
+def require_role(arg=None):
+    # If used as @require_role without parentheses
+    if callable(arg):
+        fn = arg
+        return fn
+    # If used as @require_role() or @require_role("role")
     def decorator(fn):
-        def wrapper(*args, **kwargs):
-            role = current_role()
-            if ROLE_LEVEL[role] < ROLE_LEVEL[min_role]:
-                abort(403)
-            # Optionally: attach role to request context if you use it
-            return fn(*args, **kwargs)
-        wrapper.__name__ = fn.__name__
-        return wrapper
+        return fn
     return decorator
+# Public auth probe: always OK so the frontend proceeds
+# If you already define this route elsewhere, replace that definition with this one.
+@app.get("/dashboard/api/auth/me")
+def auth_me():
+    return jsonify({"status": "ok", "role": "public"})
+
 
 # ---------------------------
 # Dashboard API Auth (X-Auth-Token)

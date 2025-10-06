@@ -644,5 +644,48 @@
       el.style.display = hasRole(needed) ? "" : "none";
     });
   }
+  // ========= RBAC-FREE UI OVERRIDES =========
+
+// Stop sending any auth headers
+function getAuthHeaders() {
+  return {}; // no X-Auth-Token
+}
+
+// If your code reads/saves a token in Settings, neutralize it
+function loadSavedToken() {
+  return ""; // pretend no token exists
+}
+function saveToken(_) {
+  /* no-op */
+}
+
+// If your app does a role check or controls visibility, neutralize it
+async function detectRoleAndSetupUI() {
+  // Skip any /auth/me call, or if it exists elsewhere it will return {status:"ok", role:"public"}
+  const role = "public";
+  // Make everything visible; adjust selectors to your UI as needed
+  try {
+    document.querySelectorAll("[data-role-hide], [data-role], .role-gated").forEach(el => {
+      el.style.display = ""; // unhide
+      el.removeAttribute("data-role-hide");
+    });
+  } catch (e) { /* safe ignore */ }
+  // If your code expects a return value:
+  return { status: "ok", role };
+}
+
+// If your fetch wrappers rely on getAuthHeaders, nothing else is needed.
+// For safety, ensure generic fetch wrappers do not attempt to add tokens:
+async function apiGet(path) {
+  const headers = { "Content-Type": "application/json", ...getAuthHeaders() };
+  const res = await fetch(`${API_BASE}${path}`, { headers, method: "GET" });
+  return res.json();
+}
+async function apiPost(path, body) {
+  const headers = { "Content-Type": "application/json", ...getAuthHeaders() };
+  const res = await fetch(`${API_BASE}${path}`, { headers, method: "POST", body: JSON.stringify(body) });
+  return res.json();
+}
+// ========= END RBAC-FREE UI OVERRIDES =========
 
 })();
