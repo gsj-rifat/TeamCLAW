@@ -70,26 +70,30 @@ ROLE_LEVEL = {"viewer": 1, "user": 2, "admin": 3}
 
 
 # Role resolution no longer used; kept only to satisfy references
+# Keep a harmless role function for compatibility with any code that calls it
 def current_role():
-    # Unified public mode; not actually used for access control
     return "public"
-# No-op decorator supporting all usages:
-# - @require_role
-# - @require_role()
-# - @require_role("viewer"/"user"/"admin")
+# Make require_role a no-op (in case any endpoints still use it)
 def require_role(arg=None):
-    # If used as @require_role without parentheses
     if callable(arg):
-        fn = arg
-        return fn
-    # If used as @require_role() or @require_role("role")
+        # used as @require_role without parentheses
+        return arg
     def decorator(fn):
         return fn
     return decorator
-# Public auth probe: always OK so the frontend proceeds
-# If you already define this route elsewhere, replace that definition with this one.
+# CRITICAL: Make require_dashboard_role a no-op so all @require_dashboard_role(...) wrappers allow access
+def require_dashboard_role(*allowed_roles):
+    # Supports both @require_dashboard_role and @require_dashboard_role(...)
+    if len(allowed_roles) == 1 and callable(allowed_roles[0]):
+        # decorator used without parentheses
+        return allowed_roles[0]
+    def decorator(fn):
+        return fn
+    return decorator
+# Ensure the auth probe is public and consistent
+# If this route is already defined, replace its body with this version and REMOVE any require_dashboard_role on it
 @app.get("/dashboard/api/auth/me")
-def auth_me():
+def auth_me_public():
     return jsonify({"status": "ok", "role": "public"})
 
 
@@ -118,17 +122,6 @@ def _get_role_from_request(req):
     if not _DASHBOARD_TOKENS and DEV_MODE:
         return "viewer"
     return None
-
-def require_dashboard_role(*allowed_roles):
-    def deco(fn):
-        def inner(*args, **kwargs):
-            role = _get_role_from_request(request)
-            if not role or (allowed_roles and role not in allowed_roles):
-                return jsonify({"error": "unauthorized"}), 401
-            return fn(*args, **kwargs)
-        inner.__name__ = fn.__name__
-        return inner
-    return deco
 
 # ---------------------------
 # Dashboard Auth (viewer/user/admin) via env tokens
