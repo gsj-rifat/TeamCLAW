@@ -256,6 +256,8 @@ Style:
         target = post_channel_id or self.config.default_post_channel_id or source_channel_id
         if target:
             posted = bool(self.post_to_slack(target, f"📘 *SOP: {result['topic']}*\n\n{result['sop_text']}"))
+
+
         return {**result, "posted": posted, "target_channel_id": target}
 
 
