@@ -721,7 +721,7 @@ def _db_connect_for_dashboard():
     return reports_service._connect()
 
 @dashboard_api.get("/stats")
-@require_dashboard_role("viewer", "user", "admin")
+#@require_dashboard_role("viewer", "user", "admin")
 def dashboard_stats():
     """
     Counts of insights for today and this week (UTC).
@@ -762,7 +762,7 @@ def dashboard_stats():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 @dashboard_api.get("/activities")
-@require_dashboard_role("viewer", "user", "admin")
+#@require_dashboard_role("viewer", "user", "admin")
 def dashboard_activities():
     """
     Recent insight events derived from the insights table.
@@ -815,7 +815,7 @@ def dashboard_activities():
 # ---------------------------
 
 @dashboard_api.get("/reports")
-@require_dashboard_role("viewer", "user", "admin")
+#@require_dashboard_role("viewer", "user", "admin")
 def dashboard_reports():
     """
     Generate daily or weekly reports for a date range (UTC), optionally filtered by channel_id.
@@ -891,7 +891,7 @@ def dashboard_reports():
 
 
 @dashboard_api.get("/reports/export.csv")
-@require_dashboard_role("viewer", "user", "admin")
+#@require_dashboard_role("viewer", "user", "admin")
 def dashboard_reports_export_csv():
     """
     Export a single period as CSV.
@@ -974,7 +974,7 @@ def _ensure_sops_table(conn):
     conn.commit()
 
 @dashboard_api.get("/sops")
-@require_dashboard_role("viewer", "user", "admin")
+#@require_dashboard_role("viewer", "user", "admin")
 def sops_list():
     q = (request.args.get("q") or "").strip()
     status = (request.args.get("status") or "").strip()
@@ -1025,7 +1025,7 @@ def sops_list():
         return jsonify({"status":"error","error":str(e)}), 500
 
 @dashboard_api.post("/sops")
-@require_dashboard_role("user", "admin")
+#@require_dashboard_role("user", "admin")
 def sops_create():
     payload = request.get_json() or {}
     topic = (payload.get("topic") or "").strip()
@@ -1064,7 +1064,7 @@ def sops_create():
         return jsonify({"status":"error","error":str(e)}), 500
 
 @dashboard_api.put("/sops/<int:sop_id>")
-@require_dashboard_role("user", "admin")
+#@require_dashboard_role("user", "admin")
 def sops_update(sop_id: int):
     payload = request.get_json() or {}
     fields, values = [], []
@@ -1088,7 +1088,7 @@ def sops_update(sop_id: int):
         return jsonify({"status":"error","error":str(e)}), 500
 
 @dashboard_api.delete("/sops/<int:sop_id>")
-@require_dashboard_role("admin")
+#@require_dashboard_role("admin")
 def sops_delete(sop_id: int):
     try:
         conn = reports_service._connect()
@@ -1193,7 +1193,7 @@ Output plain text suitable for Slack (no headers, no JSON).
 
 
 @dashboard_api.get("/summaries")
-@require_dashboard_role("viewer", "user", "admin")
+#@require_dashboard_role("viewer", "user", "admin")
 def summaries_list():
     """
     Search/filter the summaries archive.
@@ -1279,7 +1279,7 @@ def summaries_list():
 
 
 @dashboard_api.post("/summaries")
-@require_dashboard_role("user", "admin")
+#@require_dashboard_role("user", "admin")
 def summaries_create():
     """
     Create a summary.
@@ -1355,7 +1355,7 @@ def summaries_create():
 # ---------------------------
 
 @dashboard_api.get("/search")
-@require_dashboard_role("viewer", "user", "admin")
+#@require_dashboard_role("viewer", "user", "admin")
 def dashboard_global_search():
     """
     Unified search across insights, SOPs, and summaries.
@@ -1579,7 +1579,7 @@ def dashboard_global_search():
 # Auth helper: who am I? (role)
 # ---------------------------
 @dashboard_api.get("/auth/me")
-@require_dashboard_role("viewer","user","admin")
+#@require_dashboard_role("viewer","user","admin")
 def auth_me():
     #tok = _extract_token_from_request(request)
     #role = resolve_dashboard_role_from_token(tok) or "none"
