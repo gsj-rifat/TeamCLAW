@@ -243,6 +243,93 @@ class ReportsService:
 
         return "\n".join(lines)
 
+    # --- SOP persistence ---
+
+    def _init_db(self):
+        conn = self._connect()
+        cur = conn.cursor()
+        # existing tables...
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sops (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                channel_id TEXT,
+                created_by TEXT,
+                status TEXT DEFAULT 'active',
+                tags TEXT,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def sops_create(self, title, content, channel_id=None, created_by=None, status="active", tags=None,
+                    created_at=None):
+        import time, json
+        if created_at is None:
+            created_at = int(time.time())
+        tags_json = json.dumps(tags) if isinstance(tags, (list, dict)) else (tags or None)
+
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO sops (title, content, channel_id, created_by, status, tags, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (title, content, channel_id, created_by, status, tags_json, created_at))
+        sop_id = cur.lastrowid
+        conn.commit()
+        cur.close()
+        conn.close()
+        return sop_id
+
+    def sops_list(self, limit=100, status=None):
+        conn = self._connect()
+        cur = conn.cursor()
+        if status:
+            cur.execute("""
+                SELECT id, title, content, channel_id, created_by, status, tags, created_at
+                FROM sops
+                WHERE status = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (status, limit))
+        else:
+            cur.execute("""
+                SELECT id, title, content, channel_id, created_by, status, tags, created_at
+                FROM sops
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (limit,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        import json
+        items = []
+        for r in rows:
+            items.append({
+                "id": r[0],
+                "title": r[1],
+                "content": r[2],
+                "channel_id": r[3],
+                "created_by": r[4],
+                "status": r[5],
+                "tags": (json.loads(r[6]) if r[6] else None),
+                "created_at": r[7],
+            })
+        return items
+
+    def sops_update_status(self, sop_id, status):
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("UPDATE sops SET status = ? WHERE id = ?", (status, sop_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+
 
 def create_reports_blueprint(
     service: ReportsService,

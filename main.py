@@ -1024,6 +1024,16 @@ def sops_list():
     except Exception as e:
         return jsonify({"status":"error","error":str(e)}), 500
 
+def api_sops_list():
+    try:
+        status = request.args.get("status")  # optional filter
+        limit = int(request.args.get("limit", "100"))
+        items = reports_service.sops_list(limit=limit, status=status)
+        return jsonify({"status": "ok", "items": items})
+    except Exception as e:
+        print(f"[sops_list] error: {e}", flush=True)
+        return jsonify({"error": "Failed to list sops"}), 500
+
 @dashboard_api.post("/sops")
 #@require_dashboard_role("user", "admin")
 def sops_create():
@@ -1062,6 +1072,22 @@ def sops_create():
         return jsonify({"status":"ok","id": sop_id})
     except Exception as e:
         return jsonify({"status":"error","error":str(e)}), 500
+
+def api_sops_create():
+    data = request.get_json(force=True) or {}
+    title = data.get("title") or data.get("name") or "Untitled SOP"
+    content = data.get("content") or data.get("body") or ""
+    if not content:
+        return jsonify({"error": "content is required"}), 400
+    sop_id = reports_service.sops_create(
+        title=title,
+        content=content,
+        channel_id=data.get("channel_id"),
+        created_by=data.get("created_by"),
+        status=data.get("status", "active"),
+        tags=data.get("tags"),
+    )
+    return jsonify({"status": "ok", "id": sop_id})
 
 @dashboard_api.put("/sops/<int:sop_id>")
 #@require_dashboard_role("user", "admin")
