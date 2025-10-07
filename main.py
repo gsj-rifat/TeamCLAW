@@ -1702,53 +1702,15 @@ def slack_events():
                                 user_id=user_id,
                             )
 
-                            # Persist to DB so /dashboard/api/sops lists it
-                            try:
-                                # Build a reasonable SOP text. If your handler returns a full text field, prefer it.
-                                sop_text = sop_result.get("sop_text")
-                                if not sop_text:
-                                    # Fallback: compose from context if only aggregates exist
-                                    parts = []
-                                    ctx = sop_result.get("context_counts") or {}
-                                    parts.append(f"# SOP: {sop_result.get('topic', 'Untitled')}")
-                                    parts.append("")
-                                    parts.append(f"_Generated from channel <#{channel_id}>_")
-                                    parts.append("")
-                                    parts.append(f"(Context items: {ctx})")
-                                    sop_text = "\n".join(parts)
-
-                                reports_service_conn_msg = f"[sop] DB: {reports_service.config.db_path}" if hasattr(
-                                    reports_service, "config") else "[sop] DB: <unknown>"
-                                print(reports_service_conn_msg, flush=True)
-
-                                # Save with topic, author, and channel metadata
-                                now_ts = int(time.time())
-                                conn = reports_service._connect()
-                                _ensure_sops_table(conn)
-                                cur = conn.cursor()
-                                cur.execute(
-                                    """
-                                    INSERT INTO sops (created_at, updated_at, topic, channel_id, tags, author_user_id, version, status, sop_text)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                    """,
-                                    (
-                                        now_ts,
-                                        now_ts,
-                                        sop_result.get("topic") or "Untitled",
-                                        channel_id,
-                                        json.dumps({"source": "slack"}),
-                                        user_id,
-                                        "v1",
-                                        "active",
-                                        sop_text,
-                                    ),
-                                )
-                                sop_id = cur.lastrowid
-                                conn.commit()
-                                conn.close()
-                                print(f"[sop] persisted id={sop_id} topic={sop_result.get('topic')}", flush=True)
-                            except Exception as _e:
-                                print(f"[sop] persist error: {_e}", flush=True)
+                            sop_id = reports_service.sops_create(
+                                title=sop_result.get("topic") or "Untitled",
+                                channel_id=channel_id,
+                                created_by=user_id,
+                                status="active",
+                                tags={"source": "slack"},
+                                created_at=int(time.time()),
+                            )
+                            print(f"[sop] persisted id={sop_id} title={sop_result.get('topic')}", flush=True)
                             return jsonify({
                                 "status": "sop_generated",
                                 "posted": sop_result["posted"],
