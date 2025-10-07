@@ -64,11 +64,15 @@ class ReportsService:
         return conn
 
     def _init_db(self) -> None:
-        """Create the insights table if it does not exist."""
+        """Create required tables if they do not exist."""
         try:
             conn = self._connect()
             cur = conn.cursor()
+
+            # Journal mode
             cur.execute("PRAGMA journal_mode=WAL;")
+
+            # Existing insights table
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS insights (
@@ -84,6 +88,28 @@ class ReportsService:
                 );
                 """
             )
+
+            # NEW: SOPs table
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sops (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    channel_id TEXT,
+                    created_by TEXT,
+                    status TEXT DEFAULT 'active',
+                    tags TEXT,
+                    created_at INTEGER NOT NULL
+                );
+                """
+            )
+
+            # Optional helpful indexes
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sops_created_at ON sops(created_at);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sops_status ON sops(status);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sops_channel ON sops(channel_id);")
+
             conn.commit()
             conn.close()
             print(f"✅ SQLite initialized at {self.config.db_path}")
@@ -244,26 +270,6 @@ class ReportsService:
         return "\n".join(lines)
 
     # --- SOP persistence ---
-
-    def _init_db(self):
-        conn = self._connect()
-        cur = conn.cursor()
-        # existing tables...
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS sops (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                content TEXT NOT NULL,
-                channel_id TEXT,
-                created_by TEXT,
-                status TEXT DEFAULT 'active',
-                tags TEXT,
-                created_at INTEGER NOT NULL
-            )
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
 
     def sops_create(self, title, content, channel_id=None, created_by=None, status="active", tags=None,
                     created_at=None):
