@@ -140,11 +140,11 @@
     fetchBtn.addEventListener("click", fetchReports);
   }
 
-  // Optional: fill default dates (today and today) for convenience
-  const today = new Date();
-  const iso = (d) => d.toISOString().slice(0,10);
-  if (el("rep-start") && !el("rep-start").value) el("rep-start").value = iso(today);
-  if (el("rep-end") && !el("rep-end").value) el("rep-end").value = iso(today);
+  // Default report date inputs
+const repToday = new Date();
+const repIso = (d) => d.toISOString().slice(0,10);
+if (el("repstart") && !el("repstart").value) el("repstart").value = repIso(repToday);
+if (el("repend") && !el("repend").value) el("repend").value = repIso(repToday);
 
   console.log("Dashboard Reports wired (Step 3).");
 
@@ -466,13 +466,13 @@
   if (el("sum-search-btn")) el("sum-search-btn").addEventListener("click", loadSummaries);
   if (el("sum-save-btn")) el("sum-save-btn").addEventListener("click", createSummary);
 
-  // Defaults for convenience
-  const today = new Date();
-  const iso = (d) => d.toISOString().slice(0,10);
-  if (el("sum-start") && !el("sum-start").value) el("sum-start").value = iso(today);
-  if (el("sum-end") && !el("sum-end").value) el("sum-end").value = iso(today);
-  if (el("sum-start-create") && !el("sum-start-create").value) el("sum-start-create").value = iso(today);
-  if (el("sum-end-create") && !el("sum-end-create").value) el("sum-end-create").value = iso(today);
+  // Defaults for convenience (summaries)
+const sumToday = new Date();
+const sumIso = (d) => d.toISOString().slice(0,10);
+if (el("sumstart") && !el("sumstart").value) el("sumstart").value = sumIso(sumToday);
+if (el("sumend") && !el("sumend").value) el("sumend").value = sumIso(sumToday);
+if (el("sum-start-create") && !el("sum-start-create").value) el("sum-start-create").value = sumIso(sumToday);
+if (el("sum-end-create") && !el("sum-end-create").value) el("sum-end-create").value = sumIso(sumToday);
 
   // Initial load
   // Initialize: detect role, then load panels
