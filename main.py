@@ -957,20 +957,34 @@ def dashboard_reports_export_csv():
 
 def _ensure_sops_table(conn):
     cur = conn.cursor()
+    # Base table (topic/sop_text schema)
     cur.execute("""
-      CREATE TABLE IF NOT EXISTS sops (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER,
-        topic TEXT NOT NULL,
-        channel_id TEXT,
-        tags TEXT,
-        author_user_id TEXT,
-        version TEXT,
-        status TEXT,
-        sop_text TEXT NOT NULL
-      )
+        CREATE TABLE IF NOT EXISTS sops (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER,
+            topic TEXT,
+            channel_id TEXT,
+            tags TEXT,
+            author_user_id TEXT,
+            version TEXT,
+            status TEXT DEFAULT 'active',
+            sop_text TEXT
+        );
     """)
+    # Backfill missing columns if DB was created with older schema
+    cur.execute("PRAGMA table_info(sops);")
+    cols = {row[1] for row in cur.fetchall()}
+    def add_col(name, ddl):
+        if name not in cols:
+            cur.execute(f"ALTER TABLE sops ADD COLUMN {ddl};")
+    add_col("updated_at", "updated_at INTEGER")
+    add_col("topic", "topic TEXT")
+    add_col("tags", "tags TEXT")
+    add_col("author_user_id", "author_user_id TEXT")
+    add_col("version", "version TEXT")
+    add_col("status", "status TEXT DEFAULT 'active'")
+    add_col("sop_text", "sop_text TEXT")
     conn.commit()
 
 @dashboard_api.get("/sops")
@@ -1008,19 +1022,36 @@ def sops_list():
             cur.execute("""SELECT * FROM sops ORDER BY created_at DESC LIMIT 200""")
         rows = cur.fetchall()
         conn.close()
-        items = [{
-            "id": r["id"],
-            "created_at": r["created_at"],
-            "updated_at": r["updated_at"],
-            "topic": r["topic"],
-            "channel_id": r["channel_id"],
-            "tags": r["tags"],
-            "author_user_id": r["author_user_id"],
-            "version": r["version"],
-            "status": r["status"],
-            "sop_text": r["sop_text"],
-        } for r in rows]
-        return jsonify({"status":"ok","items":items})
+
+        items = []
+        for r in rows:
+            # Support both schemas:
+            topic = r.get("topic") if isinstance(r, dict) else r["topic"] if "topic" in r.keys() else None
+            sop_text = r.get("sop_text") if isinstance(r, dict) else r["sop_text"] if "sop_text" in r.keys() else None
+            # If this row is from the older title/content schema, adapt:
+            if not topic and ("title" in r.keys() if not isinstance(r, dict) else "title" in r):
+                topic = (r["title"] if not isinstance(r, dict) else r.get("title"))
+            if not sop_text and ("content" in r.keys() if not isinstance(r, dict) else "content" in r):
+                sop_text = (r["content"] if not isinstance(r, dict) else r.get("content"))
+
+            items.append({
+                "id": r["id"],
+                "created_at": r.get("created_at", None) if isinstance(r, dict) else r["created_at"],
+                "updated_at": r.get("updated_at", None) if isinstance(r, dict) else (
+                    r["updated_at"] if "updated_at" in r.keys() else None),
+                "topic": topic,
+                "channel_id": r.get("channel_id", None) if isinstance(r, dict) else (
+                    r["channel_id"] if "channel_id" in r.keys() else None),
+                "tags": r.get("tags", None) if isinstance(r, dict) else (r["tags"] if "tags" in r.keys() else None),
+                "author_user_id": r.get("author_user_id", None) if isinstance(r, dict) else (
+                    r["author_user_id"] if "author_user_id" in r.keys() else None),
+                "version": r.get("version", None) if isinstance(r, dict) else (
+                    r["version"] if "version" in r.keys() else None),
+                "status": r.get("status", None) if isinstance(r, dict) else (
+                    r["status"] if "status" in r.keys() else None),
+                "sop_text": sop_text,
+            })
+        return jsonify({"status": "ok", "items": items})
     except Exception as e:
         return jsonify({"status":"error","error":str(e)}), 500
 
@@ -1702,15 +1733,49 @@ def slack_events():
                                 user_id=user_id,
                             )
 
-                            sop_id = reports_service.sops_create(
-                                title=sop_result.get("topic") or "Untitled",
-                                channel_id=channel_id,
-                                created_by=user_id,
-                                status="active",
-                                tags={"source": "slack"},
-                                created_at=int(time.time()),
+                            # Ensure table with the expected columns
+                            conn = reports_service._connect()
+                            _ensure_sops_table(conn)
+                            cur = conn.cursor()
+
+                            # Build sop_text safely
+                            sop_text = (
+                                    sop_result.get("sop_text")
+                                    or sop_result.get("text")
+                                    or sop_result.get("content")
+                                    or sop_result.get("markdown")
                             )
-                            print(f"[sop] persisted id={sop_id} title={sop_result.get('topic')}", flush=True)
+                            if not sop_text:
+                                parts = [f"# SOP: {sop_result.get('topic', 'Untitled')}"]
+                                parts.append(f"_Generated from channel <#{channel_id}> by <@{user_id}>_")
+                                ctx = sop_result.get("context_counts") or {}
+                                if ctx:
+                                    parts.append("")
+                                    parts.append(f"(Context counts: {ctx})")
+                                sop_text = "\n".join(parts)
+
+                            now_ts = int(time.time())
+                            cur.execute(
+                                """
+                                INSERT INTO sops (created_at, updated_at, topic, channel_id, tags, author_user_id, version, status, sop_text)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    now_ts,
+                                    now_ts,
+                                    sop_result.get("topic") or "Untitled",
+                                    channel_id,
+                                    json.dumps({"source": "slack"}),
+                                    user_id,
+                                    "v1",
+                                    "active",
+                                    sop_text,
+                                ),
+                            )
+                            sop_id = cur.lastrowid
+                            conn.commit()
+                            conn.close()
+                            print(f"[sop] persisted id={sop_id} topic={sop_result.get('topic')}", flush=True)
                             return jsonify({
                                 "status": "sop_generated",
                                 "posted": sop_result["posted"],
