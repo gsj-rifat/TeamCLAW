@@ -6,8 +6,10 @@
   --accent: #38bdf8;
   --border: #1f2937;
 }
+
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; height: 100%; }
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -25,10 +27,14 @@ body {
   border-right: 1px solid var(--border);
   padding: 16px;
 }
+
 .nav h1 {
   margin: 0 0 12px;
   font-size: 18px;
 }
+
+/* Support both buttons and anchor links in the sidebar */
+.nav a,
 .nav button {
   width: 100%;
   margin: 6px 0;
@@ -39,7 +45,12 @@ body {
   border-radius: 8px;
   cursor: pointer;
   text-align: left;
+  text-decoration: none;
+  display: block;
 }
+
+.nav a.active,
+.nav a:hover,
 .nav button.active,
 .nav button:hover {
   border-color: var(--accent);
@@ -72,6 +83,7 @@ body {
   border-radius: 10px;
   padding: 12px;
 }
+
 .badge {
   display: inline-block;
   padding: 2px 8px;
@@ -81,9 +93,17 @@ body {
   color: #b3e3ff;
   margin-bottom: 6px;
 }
+
 .stat-num {
   font-size: 24px;
 }
+
 .muted {
   color: var(--muted);
 }
+
+/* View switching utility */
+.hidden { display: none !important; }
+
+/* Optional: simple stack spacing helper if needed */
+.stack > * + * { margin-top: 12px; }
