@@ -9,12 +9,25 @@
     localStorage.setItem("dash_token", val || "");
   }
 
+  function showView(viewName) {
+  // Each major section should have data-view="<name>"
+  document.querySelectorAll('[data-view]').forEach(el => el.classList.add('hidden'));
+  const active = document.querySelector(`[data-view="${viewName}"]`);
+  if (active) active.classList.remove('hidden');
+
+  // Optional: update active state on nav
+  document.querySelectorAll('[data-action^="show-"]').forEach(a => a.classList.remove('active'));
+  const nav = document.querySelector(`[data-action="show-${viewName}"]`);
+  if (nav) nav.classList.add('active');
+}
+
   function el(id) { return document.getElementById(id); }
 
   // Settings handlers
   const tokenInput = el("token-input");
   const tokenSaveBtn = el("token-save-btn");
   const tokenStatus = el("token-status");
+  const todayISO = () => new Date().toISOString().slice(0, 10);
 
   if (tokenInput && tokenSaveBtn) {
     tokenInput.value = getToken();
@@ -141,10 +154,8 @@
   }
 
   // Default report date inputs
-const repToday = new Date();
-const repIso = (d) => d.toISOString().slice(0,10);
-if (el("repstart") && !el("repstart").value) el("repstart").value = repIso(repToday);
-if (el("repend") && !el("repend").value) el("repend").value = repIso(repToday);
+if (el("repstart") && !el("repstart").value) el("repstart").value = todayISO();
+if (el("repend") && !el("repend").value) el("repend").value = todayISO();
 
   console.log("Dashboard Reports wired (Step 3).");
 
@@ -467,12 +478,11 @@ if (el("repend") && !el("repend").value) el("repend").value = repIso(repToday);
   if (el("sum-save-btn")) el("sum-save-btn").addEventListener("click", createSummary);
 
   // Defaults for convenience (summaries)
-const sumToday = new Date();
-const sumIso = (d) => d.toISOString().slice(0,10);
-if (el("sumstart") && !el("sumstart").value) el("sumstart").value = sumIso(sumToday);
-if (el("sumend") && !el("sumend").value) el("sumend").value = sumIso(sumToday);
-if (el("sum-start-create") && !el("sum-start-create").value) el("sum-start-create").value = sumIso(sumToday);
-if (el("sum-end-create") && !el("sum-end-create").value) el("sum-end-create").value = sumIso(sumToday);
+
+if (el("sumstart") && !el("sumstart").value) el("sumstart").value = todayISO();
+if (el("sumend") && !el("sumend").value) el("sumend").value = todayISO();
+if (el("sum-start-create") && !el("sum-start-create").value) el("sum-start-create").value = todayISO();
+if (el("sum-end-create") && !el("sum-end-create").value) el("sum-end-create").value = todayISO();
 
   // Initial load
   // Initialize: detect role, then load panels
@@ -559,41 +569,107 @@ if (el("sum-end-create") && !el("sum-end-create").value) el("sum-end-create").va
   }
 
   async function performGlobalSearch() {
-    const token = getToken();
-    if (!token) { alert("Please set your X-Auth-Token in Settings first."); return; }
+  const token = getToken();
+  if (!token) { alert("Please set your X-Auth-Token in Settings first."); return; }
 
-    const q = el("gs-q")?.value.trim() || "";
-    const types = gsSelectedTypes().join(",");
-    const channel_id = el("gs-channel")?.value.trim() || "";
-    const status = el("gs-status")?.value || "";
-    const start = el("gs-start")?.value.trim() || "";
-    const end = el("gs-end")?.value.trim() || "";
+  // Read filters from your existing inputs
+  const q = el("gs-q")?.value.trim() || "";
+  const channel_id = el("gs-channel")?.value.trim() || "";
+  const status = el("gs-status")?.value || "";
+  const start = el("gs-start")?.value.trim() || "";
+  const end = el("gs-end")?.value.trim() || "";
 
-    const qs = new URLSearchParams({ types });
-    if (q) qs.set("q", q);
-    if (channel_id) qs.set("channel_id", channel_id);
-    if (status) qs.set("status", status);
-    if (start) qs.set("start", start);
-    if (end) qs.set("end", end);
+  // Build common query string
+  const qs = new URLSearchParams();
+  if (q) qs.set("q", q);
+  if (channel_id) qs.set("channel_id", channel_id);
+  if (status) qs.set("status", status);
+  if (start) qs.set("start", start);
+  if (end) qs.set("end", end);
 
-    const res = await fetch(`${API_BASE}/search?${qs.toString()}`, {
-      headers: { "X-Auth-Token": token }
-    });
-    const json = await res.json();
-    if (!res.ok || json.status === "error") {
-      alert(json.error || "Search error");
-      return;
+  // Endpoints: insights via /search, plus direct summaries + sops
+  // Note: we ask /search only for insights; summaries and sops come from their dedicated endpoints
+  const insightsUrl = `${API_BASE}/search?${new URLSearchParams({ ...Object.fromEntries(qs), types: "insights" }).toString()}`;
+  const summariesUrl = `${API_BASE}/summaries?${qs.toString()}`;
+  const sopsUrl = `${API_BASE}/sops?${qs.toString()}`;
+
+  try {
+    const headers = { "X-Auth-Token": token };
+    const [insRes, sumRes, sopRes] = await Promise.all([
+      fetch(insightsUrl, { headers }),
+      fetch(summariesUrl, { headers }),
+      fetch(sopsUrl, { headers }),
+    ]);
+
+    const [insJson, sumJson, sopJson] = await Promise.all([
+      insRes.json().catch(() => ({ items: [] })),
+      sumRes.json().catch(() => ({ items: [] })),
+      sopRes.json().catch(() => ({ items: [] })),
+    ]);
+
+    if (!insRes.ok && insJson?.error) { console.warn("Insights search error:", insJson.error); }
+    if (!sumRes.ok && sumJson?.error) { console.warn("Summaries search error:", sumJson.error); }
+    if (!sopRes.ok && sopJson?.error) { console.warn("SOPs search error:", sopJson.error); }
+
+    // Normalize into the shape your renderGlobalSearch expects
+    const insights = (insJson.items || []).map(x => ({
+      id: x.id ?? x._id ?? `ins-${Math.random().toString(36).slice(2)}`,
+      type: "insight",
+      title: x.title || x.label || "Insight",
+      text: x.text || x.report_text || "",
+      channel_id: x.channel_id || x.channel || "",
+      tags: x.tags || "",
+      status: x.status || "",
+      date: x.date || x.day || "",
+      created_at: x.created_at || x.ts || null,
+    }));
+
+    const summaries = (sumJson.items || []).map(x => ({
+      id: x.id,
+      type: "summary",
+      title: x.title || `Summary ${x.id}`,
+      text: x.summary_text || "",
+      channel_id: x.channel_id || "",
+      tags: x.tags || "",
+      status: x.status || "",
+      date: x.period_start && x.period_end
+        ? `${new Date(x.period_start * 1000).toISOString().slice(0,10)} → ${new Date(x.period_end * 1000).toISOString().slice(0,10)}`
+        : (x.date || ""),
+      created_at: x.created_at || null,
+    }));
+
+    const sops = (sopJson.items || []).map(x => ({
+      id: x.id,
+      type: "sop",
+      title: x.topic || x.title || "SOP",
+      text: x.sop_text || x.content || "",
+      channel_id: x.channel_id || "",
+      tags: x.tags || "",
+      status: x.status || "",
+      date: x.date || "",
+      created_at: x.created_at || null,
+    }));
+
+    // Optional: filter by selected types if you use checkboxes (insights/summaries/sops)
+    let items = [...insights, ...summaries, ...sops];
+    if (typeof gsSelectedTypes === "function") {
+      const chosen = new Set(gsSelectedTypes().map(t => t.replace(/s$/, ""))); // "insights" -> "insight"
+      items = items.filter(it => chosen.has(it.type));
     }
-    renderGlobalSearch(json.items || []);
+
+    renderGlobalSearch(items);
+  } catch (err) {
+    console.error("[search] error", err);
+    alert("Search error. Check console for details.");
   }
+}
 
   if (el("gs-search-btn")) {
     el("gs-search-btn").addEventListener("click", performGlobalSearch);
   }
 
   // Defaults for convenience
-  const _today = new Date();
-  const _iso = (d) => d.toISOString().slice(0,10);
+
   if (el("gs-start") && !el("gs-start").value) el("gs-start").value = _iso(_today);
   if (el("gs-end") && !el("gs-end").value) el("gs-end").value = _iso(_today);
 
@@ -644,6 +720,41 @@ if (el("sum-end-create") && !el("sum-end-create").value) el("sum-end-create").va
       el.style.display = hasRole(needed) ? "" : "none";
     });
   }
+
+  document.addEventListener('DOMContentLoaded', () => {
+  try {
+    // Fill default dates if empty
+    ['repstart','repend','sumstart','sumend','sum-start-create','sum-end-create'].forEach(id => {
+      const input = document.getElementById(id);
+      if (input && !input.value) input.value = todayISO();
+    });
+
+    // Event delegation for nav and primary actions
+    document.addEventListener('click', (e) => {
+      const a = e.target.closest('[data-action]');
+      if (!a) return;
+
+      const act = a.dataset.action;
+      if (act === 'show-home') { e.preventDefault(); showView('home'); return; }
+      if (act === 'show-reports') { e.preventDefault(); showView('reports'); loadDailyReport(); return; }
+      if (act === 'show-sops') { e.preventDefault(); showView('sops'); loadSOPs(); return; }
+      if (act === 'show-summaries') { e.preventDefault(); showView('summaries'); loadSummaries(); return; }
+      if (act === 'show-settings') { e.preventDefault(); showView('settings'); return; }
+      if (act === 'show-search') { e.preventDefault(); showView('search'); return; }
+
+      if (act === 'do-search') { e.preventDefault(); performGlobalSearch(); return; }
+      if (act === 'fetch-daily-report') { e.preventDefault(); loadDailyReport(); return; }
+      if (act === 'fetch-weekly-report') { e.preventDefault(); loadWeeklyReport(); return; }
+    });
+
+    // Default landing view
+    showView('home');
+    console.log('[dashboard] initialized');
+  } catch (err) {
+    console.error('[dashboard] init error', err);
+  }
+});
+
   // ========= RBAC-FREE UI OVERRIDES =========
 
 // Stop sending any auth headers
