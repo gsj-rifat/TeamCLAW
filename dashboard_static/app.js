@@ -1,11 +1,18 @@
 (function () {
   // ===================== Config =====================
-  const API_BASE = "/dashboard/api"; // adjust if your backend is mounted elsewhere
+  const API_BASE = "/dashboard/api"; // adjust if your backend path differs
 
   // ===================== Utilities =====================
   const el = (id) => document.getElementById(id);
   const todayISO = () => new Date().toISOString().slice(0, 10);
-
+  function weekStartISO() {
+    const d = new Date();
+    const day = d.getDay(); // 0 Sun..6 Sat
+    const diff = day === 0 ? -6 : 1 - day; // Monday start
+    const s = new Date(d);
+    s.setDate(d.getDate() + diff);
+    return s.toISOString().slice(0, 10);
+  }
   function escapeHtml(s) {
     return String(s ?? "").replace(/[&<>"']/g, (m) => ({
       "&": "&amp;",
@@ -15,27 +22,30 @@
       "'": "&#39;",
     }[m]));
   }
-
   function typeBadge(t) {
     const map = { insight: "INSIGHT", sop: "SOP", summary: "SUMMARY", report: "REPORT", event: "EVENT" };
     const label = map[(t || "").toLowerCase()] || (t ? String(t).toUpperCase() : "ITEM");
     return `<span class="badge">${escapeHtml(label)}</span>`;
   }
-
-  function formatTs(ts) {
-    if (!ts) return "";
-    try {
-      // accept epoch seconds, ms, or ISO
-      if (typeof ts === "number") {
-        if (String(ts).length <= 10) return new Date(ts * 1000).toISOString().replace("T", " ").slice(0, 19);
-        return new Date(ts).toISOString().replace("T", " ").slice(0, 19);
-      }
-      const d = new Date(ts);
-      if (!isNaN(d)) return d.toISOString().replace("T", " ").slice(0, 19);
-      return String(ts);
-    } catch {
-      return String(ts);
-    }
+  function parseTsToMs(ts) {
+    if (!ts && ts !== 0) return null;
+    if (typeof ts === "number") return String(ts).length <= 10 ? ts * 1000 : ts;
+    const d = new Date(ts);
+    return isNaN(d) ? null : d.getTime();
+  }
+  function dayBoundsMs(dateISO) {
+    const d = new Date(dateISO + "T00:00:00");
+    const start = d.getTime();
+    const end = start + 24 * 60 * 60 * 1000 - 1;
+    return [start, end];
+  }
+  function rangeBoundsMs(startISO, endISO) {
+    const [s] = dayBoundsMs(startISO);
+    const [, e] = dayBoundsMs(endISO);
+    return [s, e];
+  }
+  function inMsRange(ms, startMs, endMs) {
+    return ms != null && ms >= startMs && ms <= endMs;
   }
 
   // ===================== Token (Settings) =====================
@@ -67,7 +77,6 @@
     const active = document.querySelector(`[data-view="${name}"]`);
     if (active) active.classList.remove("hidden");
 
-    // nav active state
     document.querySelectorAll(".nav [data-action]").forEach((b) => b.classList.remove("active"));
     const btn = document.querySelector(`.nav [data-action="show-${name}"]`);
     if (btn) btn.classList.add("active");
@@ -86,15 +95,17 @@
       const view = act.replace("show-", "");
       showView(view);
 
-      // Lazy loading per view
-      if (view === "reports") {
+      // Lazy load behaviors
+      if (view === "overview") {
+        loadOverview().catch(() => {});
+      } else if (view === "reports") {
         // no auto fetch to avoid surprises
       } else if (view === "sops") {
         loadSops().catch(() => {});
       } else if (view === "summaries") {
         loadSummaries().catch(() => {});
       } else if (view === "search") {
-        // optional: trigger a default search
+        // no auto search; user triggers
       } else if (view === "activities") {
         loadActivities().catch(() => {});
       }
@@ -215,10 +226,10 @@
     tbody.innerHTML = items
       .map((it) => {
         const created =
-          it.created_at ? new Date(it.created_at * 1000).toISOString().slice(0, 19).replace("T", " ") : "";
+          it.created_at ? new Date(parseTsToMs(it.created_at)).toISOString().slice(0, 19).replace("T", " ") : "";
         return `
           <tr data-id="${escapeHtml(it.id)}">
-            <td>${escapeHtml(it.topic)}</td>
+            <td>${escapeHtml(it.topic || it.title || "")}</td>
             <td>${escapeHtml(it.tags || "")}</td>
             <td>${escapeHtml(it.status || "")}</td>
             <td>${escapeHtml(created)}</td>
@@ -235,7 +246,7 @@
         const tr = e.target.closest("tr");
         const id = tr?.getAttribute("data-id");
         const row = items.find((x) => String(x.id) === String(id));
-        alert(row?.sop_text || "(empty)");
+        alert(row?.sop_text || row?.content || "(empty)");
       });
     });
   }
@@ -275,7 +286,6 @@
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || json.status === "error") throw new Error(json.error || res.status);
-      // reset
       el("sop-topic").value = "";
       el("sop-channel").value = "";
       el("sop-tags").value = "";
@@ -347,14 +357,14 @@
     tbody.innerHTML = items
       .map((it) => {
         const windowStr = it.period_start
-          ? `${new Date(it.period_start * 1000).toISOString().slice(0, 10)} → ${new Date(
-              (it.period_end || it.period_start) * 1000
+          ? `${new Date(parseTsToMs(it.period_start)).toISOString().slice(0, 10)} → ${new Date(
+              parseTsToMs(it.period_end || it.period_start)
             )
               .toISOString()
               .slice(0, 10)}`
           : it.date || "";
         const created =
-          it.created_at ? new Date(it.created_at * 1000).toISOString().slice(0, 19).replace("T", " ") : "";
+          it.created_at ? new Date(parseTsToMs(it.created_at)).toISOString().slice(0, 19).replace("T", " ") : "";
 
         return `
           <tr data-id="${escapeHtml(it.id)}">
@@ -436,7 +446,6 @@
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || json.status === "error") throw new Error(json.error || res.status);
-
       el("sum-title").value = "";
       if (!generate) el("sum-text").value = "";
       loadSummaries();
@@ -449,7 +458,6 @@
     el("sum-search-btn")?.addEventListener("click", loadSummaries);
     el("sum-save-btn")?.addEventListener("click", createSummary);
 
-    // Toggle create controls
     const genSel = el("sum-generate");
     const winWrap = el("sum-win-wrap");
     const textWrap = el("sum-text-wrap");
@@ -463,7 +471,6 @@
       update();
     }
 
-    // Defaults
     if (el("sum-start") && !el("sum-start").value) el("sum-start").value = todayISO();
     if (el("sum-end") && !el("sum-end").value) el("sum-end").value = todayISO();
     if (el("sum-start-create") && !el("sum-start-create").value) el("sum-start-create").value = todayISO();
@@ -497,7 +504,7 @@
         if (it.date) metaBits.push(`Date: ${escapeHtml(it.date)}`);
 
         const created = it.created_at
-          ? new Date(it.created_at * 1000).toISOString().slice(0, 19).replace("T", " ")
+          ? new Date(parseTsToMs(it.created_at)).toISOString().slice(0, 19).replace("T", " ")
           : "";
         if (created) metaBits.push(`Created: ${created}`);
 
@@ -513,7 +520,7 @@
             </div>
             <pre style="white-space:pre-wrap;margin-top:8px">${escapeHtml(it.text || "")}</pre>
             <div class="actions" style="margin-top:8px">
-              <button class="ghost" data-gs-copy="${escapeHtml(it.id)}">Copy</button>
+              <button class="ghost" data-gs-copy="${escapeHtml(it.id || "")}">Copy</button>
             </div>
           </div>
         `;
@@ -615,8 +622,8 @@
             status: x.status || "",
             date:
               x.period_start && x.period_end
-                ? `${new Date(x.period_start * 1000).toISOString().slice(0, 10)} → ${new Date(
-                    x.period_end * 1000
+                ? `${new Date(parseTsToMs(x.period_start)).toISOString().slice(0, 10)} → ${new Date(
+                    parseTsToMs(x.period_end)
                   )
                     .toISOString()
                     .slice(0, 10)}`
@@ -683,7 +690,6 @@
   }
 
   function renderActivities(items) {
-    // Support either ID
     const list = el("activities-list") || el("activities-results");
     if (!list) return;
 
@@ -692,20 +698,20 @@
       return;
     }
 
-    const rows = items
+    const html = items
       .map((it) => {
         const kind = it.type || it.kind || "event";
-        const when = formatTs(it.timestamp || it.ts || it.created_at);
+        const ts = parseTsToMs(it.timestamp || it.ts || it.created_at);
+        const when = ts ? new Date(ts).toISOString().replace("T", " ").slice(0, 19) : "";
         const channel = it.channel_id || it.channel || "";
-        // Text source priority
         const text =
           it.description ||
           it.text ||
           (it.meta && (it.meta.message_preview || it.meta.text)) ||
           it.title ||
           "";
-        const counts = (it.meta && it.meta.counts) || null;
 
+        const counts = (it.meta && it.meta.counts) || null;
         const countsHtml = counts
           ? `
             <div class="grid" style="margin-top:8px">
@@ -740,9 +746,8 @@
       })
       .join("");
 
-    list.innerHTML = rows;
+    list.innerHTML = html;
 
-    // Wire actions
     list.querySelectorAll("button[data-act-copy]").forEach((b) => {
       b.addEventListener("click", async (e) => {
         const panel = e.target.closest(".panel");
@@ -756,12 +761,11 @@
       });
     });
 
-    list.querySelectorAll("button[data-act-raw]").forEach((b, idx) => {
+    list.querySelectorAll("button[data-act-raw]").forEach((b) => {
       b.addEventListener("click", () => {
-        // Show the whole panel text content as a quick-and-dirty raw view
         const card = b.closest(".panel");
         const raw = card?.textContent || "";
-        alert(raw.slice(0, 4000)); // prevent overwhelming alert
+        alert(raw.slice(0, 4000));
       });
     });
   }
@@ -770,6 +774,92 @@
     el("activities-fetch-btn")?.addEventListener("click", loadActivities);
     if (el("activities-start") && !el("activities-start").value) el("activities-start").value = todayISO();
     if (el("activities-end") && !el("activities-end").value) el("activities-end").value = todayISO();
+  }
+
+  // ===================== Overview =====================
+  async function loadOverview() {
+    const token = getToken();
+    const setCount = (id, val) => {
+      const n = el(id);
+      if (n) n.textContent = String(val ?? 0);
+    };
+    if (!token) {
+      ["ovr-reports-today","ovr-reports-week","ovr-sops-today","ovr-sops-week","ovr-summaries-today","ovr-summaries-week","ovr-activities-today","ovr-activities-week"].forEach((id) => setCount(id, 0));
+      return;
+    }
+
+    const headers = { "X-Auth-Token": token };
+    const today = todayISO();
+    const wStart = weekStartISO();
+    const [todayStartMs, todayEndMs] = dayBoundsMs(today);
+    const [weekStartMs, weekEndMs] = rangeBoundsMs(wStart, today);
+
+    try {
+      // Reports: call daily for today and week
+      const reportsTodayP = fetch(`${API_BASE}/reports?granularity=daily&start=${today}&end=${today}`, { headers })
+        .then((r) => r.json().catch(() => ({})))
+        .then((j) => (Array.isArray(j.items) ? j.items.length : 0))
+        .catch(() => 0);
+      const reportsWeekP = fetch(`${API_BASE}/reports?granularity=daily&start=${wStart}&end=${today}`, { headers })
+        .then((r) => r.json().catch(() => ({})))
+        .then((j) => (Array.isArray(j.items) ? j.items.length : 0))
+        .catch(() => 0);
+
+      // Summaries: fetch week; compute week + today counts
+      const summariesWeekP = fetch(`${API_BASE}/summaries?start=${wStart}&end=${today}`, { headers })
+        .then((r) => r.json().catch(() => ({ items: [] })))
+        .catch(() => ({ items: [] }));
+
+      // Activities: fetch week; compute week + today counts
+      const activitiesWeekP = fetch(`${API_BASE}/activities?start=${wStart}&end=${today}`, { headers })
+        .then((r) => r.json().catch(() => ({ items: [] })))
+        .catch(() => ({ items: [] }));
+
+      // SOPs: fetch all or server-filtered; compute week + today counts locally
+      const sopsP = fetch(`${API_BASE}/sops?start=${wStart}&end=${today}`, { headers })
+        .then((r) => r.json().catch(() => ({ items: [] })))
+        .catch(() => ({ items: [] }));
+
+      const [repToday, repWeek, summariesRes, activitiesRes, sopsRes] = await Promise.all([
+        reportsTodayP,
+        reportsWeekP,
+        summariesWeekP,
+        activitiesWeekP,
+        sopsP,
+      ]);
+
+      // Reports
+      setCount("ovr-reports-today", repToday);
+      setCount("ovr-reports-week", repWeek);
+
+      // Summaries
+      const sumItems = Array.isArray(summariesRes.items) ? summariesRes.items : [];
+      const sumWeek = sumItems.length;
+      const sumToday = sumItems.filter((x) => inMsRange(parseTsToMs(x.created_at), todayStartMs, todayEndMs)).length;
+      setCount("ovr-summaries-today", sumToday);
+      setCount("ovr-summaries-week", sumWeek);
+
+      // Activities
+      const actItems = Array.isArray(activitiesRes.items) ? activitiesRes.items : [];
+      const actWeek = actItems.length;
+      const actToday = actItems.filter((x) => inMsRange(parseTsToMs(x.timestamp || x.ts || x.created_at), todayStartMs, todayEndMs)).length;
+      setCount("ovr-activities-today", actToday);
+      setCount("ovr-activities-week", actWeek);
+
+      // SOPs (filter client-side by created_at)
+      const sopItems = Array.isArray(sopsRes.items) ? sopsRes.items : [];
+      const sopWeek = sopItems.filter((x) => inMsRange(parseTsToMs(x.created_at), weekStartMs, weekEndMs)).length;
+      const sopToday = sopItems.filter((x) => inMsRange(parseTsToMs(x.created_at), todayStartMs, todayEndMs)).length;
+      setCount("ovr-sops-today", sopToday);
+      setCount("ovr-sops-week", sopWeek);
+    } catch (err) {
+      console.warn("Overview load error:", err);
+      ["ovr-reports-today","ovr-reports-week","ovr-sops-today","ovr-sops-week","ovr-summaries-today","ovr-summaries-week","ovr-activities-today","ovr-activities-week"].forEach((id) => setCount(id, 0));
+    }
+  }
+
+  function wireOverview() {
+    el("ovr-refresh-btn")?.addEventListener("click", () => loadOverview());
   }
 
   // ===================== Init =====================
@@ -781,8 +871,10 @@
     wireSummaries();
     wireGlobalSearch();
     wireActivities();
+    wireOverview();
 
-    // start on Overview (ensure others are hidden by default)
+    // Start on Overview and populate it
     showView("overview");
+    loadOverview().catch(() => {});
   });
 })();

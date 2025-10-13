@@ -25,10 +25,62 @@
 
       <main class="main">
         <!-- OVERVIEW (default visible) -->
-        <section class="panel" data-view="overview">
-          <h2>Welcome</h2>
-          <p>This is the dashboard shell. Data wiring will be added in the next steps.</p>
-        </section>
+      <section data-view="overview">
+        <h2>Overview</h2>
+
+        <div class="panel">
+          <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;">
+            <div>
+              <div class="muted">Reports — Today</div>
+              <div id="ovr-reports-today" style="font-size: 24px; font-weight: 700">0</div>
+            </div>
+            <div>
+              <div class="muted">Reports — This Week</div>
+              <div id="ovr-reports-week" style="font-size: 24px; font-weight: 700">0</div>
+            </div>
+
+            <div>
+              <div class="muted">SOPs — Today</div>
+              <div id="ovr-sops-today" style="font-size: 24px; font-weight: 700">0</div>
+            </div>
+            <div>
+              <div class="muted">SOPs — This Week</div>
+              <div id="ovr-sops-week" style="font-size: 24px; font-weight: 700">0</div>
+            </div>
+
+            <div>
+              <div class="muted">Summaries — Today</div>
+              <div id="ovr-summaries-today" style="font-size: 24px; font-weight: 700">0</div>
+            </div>
+            <div>
+              <div class="muted">Summaries — This Week</div>
+              <div id="ovr-summaries-week" style="font-size: 24px; font-weight: 700">0</div>
+            </div>
+
+            <div>
+              <div class="muted">Activities — Today</div>
+              <div id="ovr-activities-today" style="font-size: 24px; font-weight: 700">0</div>
+            </div>
+            <div>
+              <div class="muted">Activities — This Week</div>
+              <div id="ovr-activities-week" style="font-size: 24px; font-weight: 700">0</div>
+            </div>
+          </div>
+
+          <div style="margin-top: 12px;">
+            <button id="ovr-refresh-btn" type="button">Refresh Overview</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="grid" style="grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;">
+            <div><button type="button" data-action="show-reports" class="ghost">Go to Reports</button></div>
+            <div><button type="button" data-action="show-sops" class="ghost">Go to SOP Library</button></div>
+            <div><button type="button" data-action="show-summaries" class="ghost">Go to Summaries</button></div>
+            <div><button type="button" data-action="show-activities" class="ghost">Go to Activities</button></div>
+          </div>
+        </div>
+      </section>
 
         <section class="grid" data-view="overview">
           <div class="stat">
@@ -259,46 +311,55 @@
           </div>
         </section>
 
-        <!-- GLOBAL SEARCH -->
-        <section class="panel hidden" data-view="activities" id="global-search-panel" style="display:none">
-          <!-- Keeping placeholder so Activities is still a valid view if you wire it later -->
-        </section>
-
-        <section class="panel hidden" data-view="search" id="global-search-panel-2">
+        <!-- Global Search View -->
+        <section data-view="search" class="hidden">
           <h2>Global Search</h2>
-          <div class="grid" style="row-gap:8px">
-            <div class="searchbar" style="grid-column:1/-1">
-              <input id="gs-q" placeholder="Search across insights, SOPs, and summaries..." />
-              <label style="margin-left:8px"><input type="checkbox" id="gs-type-insights" checked /> Insights</label>
-              <label style="margin-left:8px"><input type="checkbox" id="gs-type-sops" checked /> SOPs</label>
-              <label style="margin-left:8px"><input type="checkbox" id="gs-type-summaries" checked /> Summaries</label>
-              <button class="ghost" id="gs-search-btn" style="margin-left:8px">Search</button>
-            </div>
 
-            <div>
-              <label>Channel (optional)</label>
-              <input id="gs-channel" placeholder="C0123456789" />
-            </div>
-            <div>
-              <label>Status (SOPs/Summaries)</label>
-              <select id="gs-status">
-                <option value="">Any</option>
-                <option value="active">active</option>
-                <option value="draft">draft</option>
-                <option value="deprecated">deprecated</option>
-                <option value="archived">archived</option>
-              </select>
-            </div>
-            <div>
-              <label>Start (YYYY-MM-DD)</label>
-              <input id="gs-start" placeholder="YYYY-MM-DD" />
-            </div>
-            <div>
-              <label>End (YYYY-MM-DD)</label>
-              <input id="gs-end" placeholder="YYYY-MM-DD" />
+          <div class="panel" style="margin-bottom:12px;">
+            <div class="grid" style="grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; align-items: end;">
+              <div style="grid-column: span 2;">
+                <label for="gs-q" class="muted">Query</label>
+                <input type="text" id="gs-q" placeholder="keywords, tags, phrases..." />
+              </div>
+              <div>
+                <label for="gs-channel" class="muted">Channel</label>
+                <input type="text" id="gs-channel" placeholder="C12345 or #general" />
+              </div>
+              <div>
+                <label for="gs-status" class="muted">Status</label>
+                <select id="gs-status">
+                  <option value="">All</option>
+                  <option value="active">Active</option>
+                  <option value="archived">Archived</option>
+                  <option value="pending">Pending</option>
+                  <option value="completed">Completed</option>
+                </select>
+              </div>
+              <div>
+                <label class="muted">Types</label>
+                <div style="display:flex; gap:8px; align-items:center;">
+                  <label><input type="checkbox" id="gs-type-insights" checked /> Insights</label>
+                  <label><input type="checkbox" id="gs-type-sops" checked /> SOPs</label>
+                  <label><input type="checkbox" id="gs-type-summaries" checked /> Summaries</label>
+                </div>
+              </div>
+              <div>
+                <label for="gs-start" class="muted">Start</label>
+                <input type="date" id="gs-start" />
+              </div>
+              <div>
+                <label for="gs-end" class="muted">End</label>
+                <input type="date" id="gs-end" />
+              </div>
+              <div style="grid-column: 1 / -1;">
+                <button id="gs-search-btn" type="button">Search</button>
+              </div>
             </div>
           </div>
-          <div id="gs-results" style="margin-top:12px"></div>
+
+          <div id="gs-results">
+            <div class="muted">Enter a query or choose filters and click “Search”.</div>
+          </div>
         </section>
 
         <!-- SETTINGS -->
