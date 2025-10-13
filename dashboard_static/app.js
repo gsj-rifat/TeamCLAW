@@ -1,6 +1,6 @@
 (function () {
   // ===================== Config =====================
-  const API_BASE = "/dashboard/api"; // change if your backend path differs
+  const API_BASE = "/dashboard/api"; // adjust if your backend is mounted elsewhere
 
   // ===================== Utilities =====================
   const el = (id) => document.getElementById(id);
@@ -14,6 +14,28 @@
       '"': "&quot;",
       "'": "&#39;",
     }[m]));
+  }
+
+  function typeBadge(t) {
+    const map = { insight: "INSIGHT", sop: "SOP", summary: "SUMMARY", report: "REPORT", event: "EVENT" };
+    const label = map[(t || "").toLowerCase()] || (t ? String(t).toUpperCase() : "ITEM");
+    return `<span class="badge">${escapeHtml(label)}</span>`;
+  }
+
+  function formatTs(ts) {
+    if (!ts) return "";
+    try {
+      // accept epoch seconds, ms, or ISO
+      if (typeof ts === "number") {
+        if (String(ts).length <= 10) return new Date(ts * 1000).toISOString().replace("T", " ").slice(0, 19);
+        return new Date(ts).toISOString().replace("T", " ").slice(0, 19);
+      }
+      const d = new Date(ts);
+      if (!isNaN(d)) return d.toISOString().replace("T", " ").slice(0, 19);
+      return String(ts);
+    } catch {
+      return String(ts);
+    }
   }
 
   // ===================== Token (Settings) =====================
@@ -45,6 +67,7 @@
     const active = document.querySelector(`[data-view="${name}"]`);
     if (active) active.classList.remove("hidden");
 
+    // nav active state
     document.querySelectorAll(".nav [data-action]").forEach((b) => b.classList.remove("active"));
     const btn = document.querySelector(`.nav [data-action="show-${name}"]`);
     if (btn) btn.classList.add("active");
@@ -63,9 +86,18 @@
       const view = act.replace("show-", "");
       showView(view);
 
-      // optional: lazy load per view
-      if (view === "sops") loadSops().catch(() => {});
-      if (view === "summaries") loadSummaries().catch(() => {});
+      // Lazy loading per view
+      if (view === "reports") {
+        // no auto fetch to avoid surprises
+      } else if (view === "sops") {
+        loadSops().catch(() => {});
+      } else if (view === "summaries") {
+        loadSummaries().catch(() => {});
+      } else if (view === "search") {
+        // optional: trigger a default search
+      } else if (view === "activities") {
+        loadActivities().catch(() => {});
+      }
     });
   }
 
@@ -149,9 +181,8 @@
   // ===================== SOP Library =====================
   async function loadSops() {
     const token = getToken();
-    if (!token) {
-      return; // quietly ignore if no token
-    }
+    if (!token) return;
+
     const q = el("sop-q")?.value.trim() || "";
     const status = el("sop-status")?.value || "";
 
@@ -471,13 +502,11 @@
         if (created) metaBits.push(`Created: ${created}`);
 
         const type = it.type || "";
-        const badge = `<span class="badge">${type.toUpperCase()}</span>`;
-
         return `
           <div class="panel">
             <div class="grid">
               <div style="grid-column:1/-1">
-                ${badge}
+                ${typeBadge(type)}
                 <strong style="margin-left:6px">${escapeHtml(it.title || "(untitled)")}</strong>
               </div>
               <div style="grid-column:1/-1" class="muted">${metaBits.join(" • ")}</div>
@@ -526,7 +555,6 @@
     if (start) qs.set("start", start);
     if (end) qs.set("end", end);
 
-    // This version fetches each type separately to keep compatibility with typical backends
     const headers = { "X-Auth-Token": token };
     const selected = gsSelectedTypes();
 
@@ -622,6 +650,128 @@
     if (el("gs-end") && !el("gs-end").value) el("gs-end").value = todayISO();
   }
 
+  // ===================== Activities =====================
+  async function loadActivities() {
+    const token = getToken();
+    if (!token) {
+      alert("Please set your X-Auth-Token in Settings first.");
+      return;
+    }
+
+    const start = el("activities-start")?.value?.trim() || "";
+    const end = el("activities-end")?.value?.trim() || "";
+    const channel_id = el("activities-channel")?.value?.trim() || "";
+    const status = el("activities-status")?.value || "";
+
+    const qs = new URLSearchParams();
+    if (start) qs.set("start", start);
+    if (end) qs.set("end", end);
+    if (channel_id) qs.set("channel_id", channel_id);
+    if (status) qs.set("status", status);
+
+    try {
+      const res = await fetch(`${API_BASE}/activities?${qs.toString()}`, {
+        headers: { "X-Auth-Token": token },
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || json.status === "error") throw new Error(json.error || "Failed to load activities");
+      renderActivities(json.items || []);
+    } catch (err) {
+      console.warn(err);
+      renderActivities([]);
+    }
+  }
+
+  function renderActivities(items) {
+    // Support either ID
+    const list = el("activities-list") || el("activities-results");
+    if (!list) return;
+
+    if (!items?.length) {
+      list.innerHTML = `<div class="muted">No recent activities for the selected filters.</div>`;
+      return;
+    }
+
+    const rows = items
+      .map((it) => {
+        const kind = it.type || it.kind || "event";
+        const when = formatTs(it.timestamp || it.ts || it.created_at);
+        const channel = it.channel_id || it.channel || "";
+        // Text source priority
+        const text =
+          it.description ||
+          it.text ||
+          (it.meta && (it.meta.message_preview || it.meta.text)) ||
+          it.title ||
+          "";
+        const counts = (it.meta && it.meta.counts) || null;
+
+        const countsHtml = counts
+          ? `
+            <div class="grid" style="margin-top:8px">
+              <div><div class="muted">Decisions</div><div>${counts.decisions || 0}</div></div>
+              <div><div class="muted">To-Dos</div><div>${counts.todos || 0}</div></div>
+              <div><div class="muted">Facts</div><div>${counts.facts || 0}</div></div>
+            </div>
+          `
+          : "";
+
+        const metaLine = [when ? `When: ${escapeHtml(when)}` : "", channel ? `Channel: ${escapeHtml(channel)}` : ""]
+          .filter(Boolean)
+          .join(" • ");
+
+        return `
+          <div class="panel">
+            <div class="grid">
+              <div style="grid-column:1/-1">
+                ${typeBadge(kind)}
+                <strong style="margin-left:6px">${escapeHtml(it.title || kind.toUpperCase())}</strong>
+              </div>
+              <div style="grid-column:1/-1" class="muted">${metaLine}</div>
+            </div>
+            <pre style="white-space:pre-wrap;margin-top:8px">${escapeHtml(text)}</pre>
+            ${countsHtml}
+            <div class="actions" style="margin-top:8px">
+              <button class="ghost" data-act-copy="${escapeHtml(it.id || "")}">Copy</button>
+              <button class="ghost" data-act-raw="${escapeHtml(it.id || "")}">View raw</button>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
+
+    list.innerHTML = rows;
+
+    // Wire actions
+    list.querySelectorAll("button[data-act-copy]").forEach((b) => {
+      b.addEventListener("click", async (e) => {
+        const panel = e.target.closest(".panel");
+        const pre = panel?.querySelector("pre");
+        try {
+          await navigator.clipboard.writeText(pre?.textContent || "");
+          alert("Copied to clipboard.");
+        } catch {
+          alert("Copy failed.");
+        }
+      });
+    });
+
+    list.querySelectorAll("button[data-act-raw]").forEach((b, idx) => {
+      b.addEventListener("click", () => {
+        // Show the whole panel text content as a quick-and-dirty raw view
+        const card = b.closest(".panel");
+        const raw = card?.textContent || "";
+        alert(raw.slice(0, 4000)); // prevent overwhelming alert
+      });
+    });
+  }
+
+  function wireActivities() {
+    el("activities-fetch-btn")?.addEventListener("click", loadActivities);
+    if (el("activities-start") && !el("activities-start").value) el("activities-start").value = todayISO();
+    if (el("activities-end") && !el("activities-end").value) el("activities-end").value = todayISO();
+  }
+
   // ===================== Init =====================
   document.addEventListener("DOMContentLoaded", () => {
     wireNav();
@@ -630,8 +780,9 @@
     wireSops();
     wireSummaries();
     wireGlobalSearch();
+    wireActivities();
 
-    // start on Overview
+    // start on Overview (ensure others are hidden by default)
     showView("overview");
   });
 })();

@@ -53,10 +53,44 @@
           <p class="muted">No activities yet. This feed will populate in Step 2+.</p>
         </section>
 
-        <!-- ACTIVITIES (placeholder, hidden for now) -->
-        <section class="panel hidden" data-view="activities">
-          <h2>Activities</h2>
-          <p class="muted">Coming soon.</p>
+        <!-- Activities View -->
+        <section data-view="activities" class="hidden">
+          <h2>Recent Activities</h2>
+
+          <div class="panel" style="margin-bottom:12px;">
+            <div class="grid" style="grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; align-items: end;">
+              <div>
+                <label for="activities-start" class="muted">Start Date</label>
+                <input type="date" id="activities-start" />
+              </div>
+              <div>
+                <label for="activities-end" class="muted">End Date</label>
+                <input type="date" id="activities-end" />
+              </div>
+              <div>
+                <label for="activities-channel" class="muted">Channel</label>
+                <input type="text" id="activities-channel" placeholder="e.g. C12345 or #general" />
+              </div>
+              <div>
+                <label for="activities-status" class="muted">Status</label>
+                <select id="activities-status">
+                  <option value="">All</option>
+                  <option value="active">Active</option>
+                  <option value="archived">Archived</option>
+                  <option value="pending">Pending</option>
+                  <option value="completed">Completed</option>
+                </select>
+              </div>
+              <div style="grid-column: span 2;">
+                <button id="activities-fetch-btn" type="button">Fetch Activities</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Results container (app.js will fill this) -->
+          <div id="activities-results">
+            <div class="muted">Use the filters above and click “Fetch Activities”.</div>
+          </div>
         </section>
 
         <!-- REPORTS -->
