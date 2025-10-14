@@ -12,6 +12,10 @@ from sop_generator import SopConfig, SopService, SlackSopCommandHandler, create_
 from sop_readiness import SopReadinessService, SopReadinessConfig, create_sop_readiness_blueprint
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify, Blueprint, send_from_directory, redirect, abort
+import sqlite3, threading, time
+from contextlib import contextmanager
+
+
 
 app = Flask(__name__)
 # WSGI alias for gunicorn (main:application)
@@ -38,6 +42,9 @@ SLACK_SIGNING_SECRET = os.getenv('SLACK_SIGNING_SECRET')
 SLACK_BOT_TOKEN = os.getenv('SLACK_BOT_TOKEN')
 TARGET_CHANNEL_ID = os.getenv('TARGET_CHANNEL_ID')
 INSIGHTS_DB_PATH = os.getenv('INSIGHTS_DB_PATH', 'insights.db')
+DB_PATH = os.getenv("DB_PATH") or INSIGHTS_DB_PATH
+os.environ.setdefault("DB_PATH", DB_PATH)
+
 REPORT_POST_CHANNEL_ID = os.getenv('REPORT_POST_CHANNEL_ID', TARGET_CHANNEL_ID or '')
 REPORT_INCLUDE_FACTS = os.getenv('REPORT_INCLUDE_FACTS', 'true').lower() == 'true'
 REPORT_MAX_ITEMS = int(os.getenv('REPORT_MAX_ITEMS', '50'))
@@ -67,6 +74,81 @@ INSIGHTS_DB_PATH = os.getenv("INSIGHTS_DB_PATH", os.path.join(BASE_DIR, "insight
 DISABLE_DASHBOARD_AUTH = os.getenv("DISABLE_DASHBOARD_AUTH", "true").lower() in ("1", "true", "yes")
 DEFAULT_PUBLIC_ROLE = os.getenv("DEFAULT_PUBLIC_ROLE", "admin")  # or "admin" if you want full access
 ROLE_LEVEL = {"viewer": 1, "user": 2, "admin": 3}
+
+def connect_db(read_only: bool = False) -> sqlite3.Connection:
+    """
+    Short-lived SQLite connection with WAL + busy_timeout.
+    Controls transactions manually (isolation_level=None).
+    """
+    if read_only:
+        uri = f"file:{DB_PATH}?mode=ro"
+        conn = sqlite3.connect(
+            uri,
+            uri=True,
+            timeout=30,
+            check_same_thread=False,
+            isolation_level=None,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000;")
+        return conn
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+        check_same_thread=False,
+        isolation_level=None,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=30000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+# Backward-compatibility: keep existing call sites working
+_connect = connect_db
+
+def _ensure_sops_table():
+    conn = _connect(read_only=False)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sops (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT NOT NULL,
+                channel_id TEXT,
+                tags TEXT,
+                status TEXT DEFAULT 'active',
+                sop_text TEXT,
+                created_at INTEGER DEFAULT (strftime('%s','now')),
+                updated_at INTEGER
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+@contextmanager
+def db_read():
+    conn = connect_db(read_only=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+@contextmanager
+def db_write():
+    conn = connect_db(read_only=False)
+    try:
+        conn.execute("BEGIN IMMEDIATE;")
+        yield conn
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+# Call once at startup (after app creation)
+_ensure_sops_table()
+
 
 
 # Role resolution no longer used; kept only to satisfy references
@@ -955,207 +1037,143 @@ def dashboard_reports_export_csv():
 # SOP Library (list/create/edit/delete)
 # ---------------------------
 
-def _ensure_sops_table(conn):
-    cur = conn.cursor()
-    # Base table (topic/sop_text schema)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sops (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER,
-            topic TEXT,
-            channel_id TEXT,
-            tags TEXT,
-            author_user_id TEXT,
-            version TEXT,
-            status TEXT DEFAULT 'active',
-            sop_text TEXT
-        );
-    """)
-    # Backfill missing columns if DB was created with older schema
-    cur.execute("PRAGMA table_info(sops);")
-    cols = {row[1] for row in cur.fetchall()}
-    def add_col(name, ddl):
-        if name not in cols:
-            cur.execute(f"ALTER TABLE sops ADD COLUMN {ddl};")
-    add_col("updated_at", "updated_at INTEGER")
-    add_col("topic", "topic TEXT")
-    add_col("tags", "tags TEXT")
-    add_col("author_user_id", "author_user_id TEXT")
-    add_col("version", "version TEXT")
-    add_col("status", "status TEXT DEFAULT 'active'")
-    add_col("sop_text", "sop_text TEXT")
-    conn.commit()
-
 @dashboard_api.get("/sops")
-#@require_dashboard_role("viewer", "user", "admin")
 def sops_list():
     q = (request.args.get("q") or "").strip()
     status = (request.args.get("status") or "").strip()
-    try:
-        conn = reports_service._connect()
-        _ensure_sops_table(conn)
-        cur = conn.cursor()
-        if q and status:
-            cur.execute("""
-                SELECT * FROM sops
-                WHERE (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?)
-                AND status = ?
-                ORDER BY created_at DESC
-                LIMIT 200
-            """, (f"%{q}%", f"%{q}%", f"%{q}%", status))
-        elif q:
-            cur.execute("""
-                SELECT * FROM sops
-                WHERE topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?
-                ORDER BY created_at DESC
-                LIMIT 200
-            """, (f"%{q}%", f"%{q}%", f"%{q}%"))
-        elif status:
-            cur.execute("""
-                SELECT * FROM sops
-                WHERE status = ?
-                ORDER BY created_at DESC
-                LIMIT 200
-            """, (status,))
-        else:
-            cur.execute("""SELECT * FROM sops ORDER BY created_at DESC LIMIT 200""")
-        rows = cur.fetchall()
-        conn.close()
 
+    sql = "SELECT * FROM sops WHERE 1=1"
+    params = []
+
+    if q and status:
+        sql += " AND (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?) AND status = ?"
+        like = f"%{q}%"
+        params += [like, like, like, status]
+    elif q:
+        sql += " AND (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?)"
+        like = f"%{q}%"
+        params += [like, like, like]
+    elif status:
+        sql += " AND status = ?"
+        params.append(status)
+
+    sql += " ORDER BY created_at DESC LIMIT 200"
+
+    try:
+        with db_read() as conn:
+            _ensure_sops_table(conn)
+            rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+        # Backward-compatible mapping for older schema fields
         items = []
         for r in rows:
-            # Support both schemas:
-            topic = r.get("topic") if isinstance(r, dict) else r["topic"] if "topic" in r.keys() else None
-            sop_text = r.get("sop_text") if isinstance(r, dict) else r["sop_text"] if "sop_text" in r.keys() else None
-            # If this row is from the older title/content schema, adapt:
-            if not topic and ("title" in r.keys() if not isinstance(r, dict) else "title" in r):
-                topic = (r["title"] if not isinstance(r, dict) else r.get("title"))
-            if not sop_text and ("content" in r.keys() if not isinstance(r, dict) else "content" in r):
-                sop_text = (r["content"] if not isinstance(r, dict) else r.get("content"))
+            topic = r.get("topic")
+            sop_text = r.get("sop_text")
+
+            # If old schema had title/content, adapt
+            if not topic and "title" in r:
+                topic = r.get("title")
+            if not sop_text and "content" in r:
+                sop_text = r.get("content")
 
             items.append({
-                "id": r["id"],
-                "created_at": r.get("created_at", None) if isinstance(r, dict) else r["created_at"],
-                "updated_at": r.get("updated_at", None) if isinstance(r, dict) else (
-                    r["updated_at"] if "updated_at" in r.keys() else None),
+                "id": r.get("id"),
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
                 "topic": topic,
-                "channel_id": r.get("channel_id", None) if isinstance(r, dict) else (
-                    r["channel_id"] if "channel_id" in r.keys() else None),
-                "tags": r.get("tags", None) if isinstance(r, dict) else (r["tags"] if "tags" in r.keys() else None),
-                "author_user_id": r.get("author_user_id", None) if isinstance(r, dict) else (
-                    r["author_user_id"] if "author_user_id" in r.keys() else None),
-                "version": r.get("version", None) if isinstance(r, dict) else (
-                    r["version"] if "version" in r.keys() else None),
-                "status": r.get("status", None) if isinstance(r, dict) else (
-                    r["status"] if "status" in r.keys() else None),
+                "channel_id": r.get("channel_id"),
+                "tags": r.get("tags"),
+                "author_user_id": r.get("author_user_id"),
+                "version": r.get("version"),
+                "status": r.get("status"),
                 "sop_text": sop_text,
             })
-        return jsonify({"status": "ok", "items": items})
-    except Exception as e:
-        return jsonify({"status":"error","error":str(e)}), 500
 
-def api_sops_list():
-    try:
-        status = request.args.get("status")  # optional filter
-        limit = int(request.args.get("limit", "100"))
-        items = reports_service.sops_list(limit=limit, status=status)
         return jsonify({"status": "ok", "items": items})
     except Exception as e:
-        print(f"[sops_list] error: {e}", flush=True)
-        return jsonify({"error": "Failed to list sops"}), 500
+        return jsonify({"status": "error", "error": str(e)}), 500
+
 
 @dashboard_api.post("/sops")
-#@require_dashboard_role("user", "admin")
 def sops_create():
     payload = request.get_json() or {}
+
     topic = (payload.get("topic") or "").strip()
     if not topic:
-        return jsonify({"error":"topic is required"}), 400
+        return jsonify({"error": "topic is required"}), 400
+
     channel_id = (payload.get("channel_id") or "").strip() or None
     tags = (payload.get("tags") or "").strip()
-    author_user_id = (payload.get("author_user_id") or "").strip()
+    author_user_id = (payload.get("author_user_id") or "").strip() or None
     version = (payload.get("version") or "v1").strip()
-    status = (payload.get("status") or "active").strip()
+    status = (payload.get("status") or "active").strip() or "active"
     generate = bool(payload.get("generate", False))
     days = payload.get("days")
 
+    # IMPORTANT: Perform slow/remote work before starting a write
+    if generate:
+        # Use your existing generator (outside DB transaction)
+        # res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
+        # sop_text = res["sop_text"]
+        res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
+        sop_text = res.get("sop_text", "") if isinstance(res, dict) else ""
+    else:
+        sop_text = (payload.get("sop_text") or "").strip()
+        if not sop_text:
+            return jsonify({"error": "sop_text required when generate=false"}), 400
+
+    now_ts = int(time.time())
+
     try:
-        if generate:
-            # Use existing SOP generator logic (no posting)
-            res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
-            sop_text = res["sop_text"]
-        else:
-            sop_text = (payload.get("sop_text") or "").strip()
-            if not sop_text:
-                return jsonify({"error":"sop_text required when generate=false"}), 400
+        with db_write() as conn:
+            _ensure_sops_table(conn)
+            cur = conn.execute("""
+                INSERT INTO sops (created_at, updated_at, topic, channel_id, tags, author_user_id, version, status, sop_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (now_ts, now_ts, topic, channel_id, tags, author_user_id, version, status, sop_text))
+            new_id = cur.lastrowid
 
-        now_ts = int(time.time())
-        conn = reports_service._connect()
-        _ensure_sops_table(conn)
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO sops (created_at, updated_at, topic, channel_id, tags, author_user_id, version, status, sop_text)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (now_ts, now_ts, topic, channel_id, tags, author_user_id, version, status, sop_text))
-        sop_id = cur.lastrowid
-        conn.commit(); conn.close()
-        return jsonify({"status":"ok","id": sop_id})
+        return jsonify({"status": "ok", "id": new_id})
     except Exception as e:
-        return jsonify({"status":"error","error":str(e)}), 500
+        return jsonify({"status": "error", "error": str(e)}), 500
 
-def api_sops_create():
-    data = request.get_json(force=True) or {}
-    title = data.get("title") or data.get("name") or "Untitled SOP"
-    content = data.get("content") or data.get("body") or ""
-    if not content:
-        return jsonify({"error": "content is required"}), 400
-    sop_id = reports_service.sops_create(
-        title=title,
-        content=content,
-        channel_id=data.get("channel_id"),
-        created_by=data.get("created_by"),
-        status=data.get("status", "active"),
-        tags=data.get("tags"),
-    )
-    return jsonify({"status": "ok", "id": sop_id})
 
 @dashboard_api.put("/sops/<int:sop_id>")
-#@require_dashboard_role("user", "admin")
 def sops_update(sop_id: int):
     payload = request.get_json() or {}
     fields, values = [], []
-    for key in ("topic","channel_id","tags","author_user_id","version","status","sop_text"):
+
+    for key in ("topic", "channel_id", "tags", "author_user_id", "version", "status", "sop_text"):
         if key in payload:
-            fields.append(f"{key}=?")
-            values.append(payload[key])
+            fields.append(f"{key} = ?")
+            values.append(payload.get(key))
+
     if not fields:
-        return jsonify({"error":"no fields to update"}), 400
+        return jsonify({"error": "no fields to update"}), 400
 
     try:
-        conn = reports_service._connect()
-        _ensure_sops_table(conn)
-        cur = conn.cursor()
-        values.append(int(time.time()))
-        values.append(sop_id)
-        cur.execute(f"UPDATE sops SET {', '.join(fields)}, updated_at=? WHERE id=?", values)
-        conn.commit(); conn.close()
-        return jsonify({"status":"ok"})
+        with db_write() as conn:
+            _ensure_sops_table(conn)
+            values.append(int(time.time()))
+            values.append(sop_id)
+            conn.execute(
+                f"UPDATE sops SET {', '.join(fields)}, updated_at = ? WHERE id = ?",
+                values
+            )
+        return jsonify({"status": "ok"})
     except Exception as e:
-        return jsonify({"status":"error","error":str(e)}), 500
+        return jsonify({"status": "error", "error": str(e)}), 500
+
 
 @dashboard_api.delete("/sops/<int:sop_id>")
-#@require_dashboard_role("admin")
 def sops_delete(sop_id: int):
     try:
-        conn = reports_service._connect()
-        _ensure_sops_table(conn)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM sops WHERE id=?", (sop_id,))
-        conn.commit(); conn.close()
-        return jsonify({"status":"ok"})
+        with db_write() as conn:
+            _ensure_sops_table(conn)
+            conn.execute("DELETE FROM sops WHERE id = ?", (sop_id,))
+        return jsonify({"status": "ok"})
     except Exception as e:
-        return jsonify({"status":"error","error":str(e)}), 500
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 # ---------------------------
 # Summaries Archive (search/filter/create)
