@@ -963,63 +963,82 @@ def dashboard_reports_export_csv():
 # SOP Library (list/create/edit/delete)
 # ---------------------------
 
-# Serialize writers within the process to avoid writer contention
+
 _WRITE_LOCK = threading.Lock()
 
 def connect_db(read_only: bool = False) -> sqlite3.Connection:
-    """
-    Short-lived SQLite connection with WAL and busy_timeout.
-    isolation_level=None so we control transactions explicitly.
-    """
     if read_only:
         uri = f"file:{DB_PATH}?mode=ro"
-        conn = sqlite3.connect(
-            uri, uri=True, timeout=30, check_same_thread=False, isolation_level=None
-        )
+        conn = sqlite3.connect(uri, uri=True, timeout=30, check_same_thread=False, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=30000;")
         return conn
 
-    conn = sqlite3.connect(
-        DB_PATH, timeout=30, check_same_thread=False, isolation_level=None
-    )
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=30000;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    cols = set()
+    for r in conn.execute(f"PRAGMA table_info({table})").fetchall():
+        # r: cid, name, type, notnull, dflt_value, pk
+        cols.add(r[1] if isinstance(r, tuple) else r["name"])
+    return cols
+
 def _ensure_sops_table(conn: sqlite3.Connection | None = None):
     """
-    Ensure the sops table exists. Accepts an optional connection for flexibility.
-    If no connection is provided, it opens a short-lived write connection.
+    Ensure sops table exists and migrate legacy schemas by adding missing columns.
+    Safe to call often.
     """
-    local_conn = None
+    local = None
     try:
         if conn is None:
-            local_conn = connect_db(read_only=False)
-            c = local_conn
+            local = connect_db(read_only=False)
+            c = local
         else:
             c = conn
+
+        # Create table if missing (minimal schema)
         c.execute("""
             CREATE TABLE IF NOT EXISTS sops (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at INTEGER,
-                updated_at INTEGER,
-                topic TEXT,
-                channel_id TEXT,
-                tags TEXT,
-                author_user_id TEXT,
-                version TEXT,
-                status TEXT,
-                sop_text TEXT
+                id INTEGER PRIMARY KEY AUTOINCREMENT
             )
         """)
-        if local_conn:
-            local_conn.commit()
+
+        cols = _columns(c, "sops")
+
+        # Add any missing columns used by the app
+        schema_adds = []
+        if "created_at" not in cols:
+            schema_adds.append("ADD COLUMN created_at INTEGER")
+        if "updated_at" not in cols:
+            schema_adds.append("ADD COLUMN updated_at INTEGER")
+        if "topic" not in cols:
+            schema_adds.append("ADD COLUMN topic TEXT")
+        if "channel_id" not in cols:
+            schema_adds.append("ADD COLUMN channel_id TEXT")
+        if "tags" not in cols:
+            schema_adds.append("ADD COLUMN tags TEXT")
+        if "author_user_id" not in cols:
+            schema_adds.append("ADD COLUMN author_user_id TEXT")
+        if "version" not in cols:
+            schema_adds.append("ADD COLUMN version TEXT")
+        if "status" not in cols:
+            schema_adds.append("ADD COLUMN status TEXT")
+        if "sop_text" not in cols:
+            schema_adds.append("ADD COLUMN sop_text TEXT")
+
+        for stmt in schema_adds:
+            c.execute(f"ALTER TABLE sops {stmt}")
+
+        if local:
+            local.commit()
     finally:
-        if local_conn:
-            local_conn.close()
+        if local:
+            local.close()
 
 @contextmanager
 def db_read():
@@ -1031,10 +1050,6 @@ def db_read():
 
 @contextmanager
 def db_write():
-    """
-    Acquire a write lock and keep the transaction as short as possible.
-    BEGIN IMMEDIATE grabs the write lock up front.
-    """
     conn = connect_db(read_only=False)
     try:
         with _WRITE_LOCK:
@@ -1051,36 +1066,60 @@ def db_write():
         conn.close()
 
 
+
+def _parse_date_yyyy_mm_dd(s: str) -> int | None:
+    try:
+        if not s:
+            return None
+        # midnight UTC
+        return int(time.mktime(time.strptime(s, "%Y-%m-%d")))
+    except Exception:
+        return None
+
 @dashboard_api.get("/sops")
 def sops_list():
     q = (request.args.get("q") or "").strip()
     status = (request.args.get("status") or "").strip()
+    start_iso = (request.args.get("start") or "").strip()
+    end_iso = (request.args.get("end") or "").strip()
+
+    start = _parse_date_yyyy_mm_dd(start_iso)
+    end = _parse_date_yyyy_mm_dd(end_iso)
+    if end is not None:
+        end = end + 86399  # include end of day
 
     sql = "SELECT * FROM sops WHERE 1=1"
     params = []
 
-    if q and status:
-        like = f"%{q}%"
-        sql += " AND (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?) AND status = ?"
-        params += [like, like, like, status]
-    elif q:
+    if q:
         like = f"%{q}%"
         sql += " AND (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?)"
         params += [like, like, like]
-    elif status:
+
+    if status:
         sql += " AND status = ?"
         params.append(status)
 
-    sql += " ORDER BY created_at DESC LIMIT 200"
+    if start is not None and end is not None:
+        sql += " AND created_at BETWEEN ? AND ?"
+        params += [start, end]
+    elif start is not None:
+        sql += " AND created_at >= ?"
+        params.append(start)
+    elif end is not None:
+        sql += " AND created_at <= ?"
+        params.append(end)
+
+    sql += " ORDER BY created_at DESC LIMIT 500"
 
     try:
         with db_read() as conn:
             _ensure_sops_table(conn)
             rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
 
+        # Map legacy fields if present
         items = []
         for r in rows:
-            # Backward-compatible mapping for older schema fields
             topic = r.get("topic") or r.get("title")
             sop_text = r.get("sop_text") or r.get("content")
             items.append({
@@ -1117,8 +1156,9 @@ def sops_create():
     generate = bool(payload.get("generate", False))
     days = payload.get("days")
 
-    # IMPORTANT: Perform slow/remote work before starting a write transaction
+    # LLM generation outside any DB transaction
     if generate:
+        # Uses your existing service; adapt if its signature differs
         res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
         sop_text = res.get("sop_text", "") if isinstance(res, dict) else ""
     else:
