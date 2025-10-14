@@ -75,80 +75,6 @@ DISABLE_DASHBOARD_AUTH = os.getenv("DISABLE_DASHBOARD_AUTH", "true").lower() in 
 DEFAULT_PUBLIC_ROLE = os.getenv("DEFAULT_PUBLIC_ROLE", "admin")  # or "admin" if you want full access
 ROLE_LEVEL = {"viewer": 1, "user": 2, "admin": 3}
 
-def connect_db(read_only: bool = False) -> sqlite3.Connection:
-    """
-    Short-lived SQLite connection with WAL + busy_timeout.
-    Controls transactions manually (isolation_level=None).
-    """
-    if read_only:
-        uri = f"file:{DB_PATH}?mode=ro"
-        conn = sqlite3.connect(
-            uri,
-            uri=True,
-            timeout=30,
-            check_same_thread=False,
-            isolation_level=None,
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=30000;")
-        return conn
-    conn = sqlite3.connect(
-        DB_PATH,
-        timeout=30,
-        check_same_thread=False,
-        isolation_level=None,
-    )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=30000;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    return conn
-# Backward-compatibility: keep existing call sites working
-_connect = connect_db
-
-def _ensure_sops_table():
-    conn = _connect(read_only=False)
-    try:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS sops (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                topic TEXT NOT NULL,
-                channel_id TEXT,
-                tags TEXT,
-                status TEXT DEFAULT 'active',
-                sop_text TEXT,
-                created_at INTEGER DEFAULT (strftime('%s','now')),
-                updated_at INTEGER
-            )
-        """)
-        conn.commit()
-    finally:
-        conn.close()
-@contextmanager
-def db_read():
-    conn = connect_db(read_only=True)
-    try:
-        yield conn
-    finally:
-        conn.close()
-@contextmanager
-def db_write():
-    conn = connect_db(read_only=False)
-    try:
-        conn.execute("BEGIN IMMEDIATE;")
-        yield conn
-        conn.commit()
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        raise
-    finally:
-        conn.close()
-# Call once at startup (after app creation)
-_ensure_sops_table()
-
 
 
 # Role resolution no longer used; kept only to satisfy references
@@ -1037,6 +963,94 @@ def dashboard_reports_export_csv():
 # SOP Library (list/create/edit/delete)
 # ---------------------------
 
+# Serialize writers within the process to avoid writer contention
+_WRITE_LOCK = threading.Lock()
+
+def connect_db(read_only: bool = False) -> sqlite3.Connection:
+    """
+    Short-lived SQLite connection with WAL and busy_timeout.
+    isolation_level=None so we control transactions explicitly.
+    """
+    if read_only:
+        uri = f"file:{DB_PATH}?mode=ro"
+        conn = sqlite3.connect(
+            uri, uri=True, timeout=30, check_same_thread=False, isolation_level=None
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000;")
+        return conn
+
+    conn = sqlite3.connect(
+        DB_PATH, timeout=30, check_same_thread=False, isolation_level=None
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=30000;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
+def _ensure_sops_table(conn: sqlite3.Connection | None = None):
+    """
+    Ensure the sops table exists. Accepts an optional connection for flexibility.
+    If no connection is provided, it opens a short-lived write connection.
+    """
+    local_conn = None
+    try:
+        if conn is None:
+            local_conn = connect_db(read_only=False)
+            c = local_conn
+        else:
+            c = conn
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sops (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at INTEGER,
+                updated_at INTEGER,
+                topic TEXT,
+                channel_id TEXT,
+                tags TEXT,
+                author_user_id TEXT,
+                version TEXT,
+                status TEXT,
+                sop_text TEXT
+            )
+        """)
+        if local_conn:
+            local_conn.commit()
+    finally:
+        if local_conn:
+            local_conn.close()
+
+@contextmanager
+def db_read():
+    conn = connect_db(read_only=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+@contextmanager
+def db_write():
+    """
+    Acquire a write lock and keep the transaction as short as possible.
+    BEGIN IMMEDIATE grabs the write lock up front.
+    """
+    conn = connect_db(read_only=False)
+    try:
+        with _WRITE_LOCK:
+            conn.execute("BEGIN IMMEDIATE;")
+            yield conn
+            conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
 @dashboard_api.get("/sops")
 def sops_list():
     q = (request.args.get("q") or "").strip()
@@ -1046,12 +1060,12 @@ def sops_list():
     params = []
 
     if q and status:
-        sql += " AND (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?) AND status = ?"
         like = f"%{q}%"
+        sql += " AND (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?) AND status = ?"
         params += [like, like, like, status]
     elif q:
-        sql += " AND (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?)"
         like = f"%{q}%"
+        sql += " AND (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?)"
         params += [like, like, like]
     elif status:
         sql += " AND status = ?"
@@ -1064,18 +1078,11 @@ def sops_list():
             _ensure_sops_table(conn)
             rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
 
-        # Backward-compatible mapping for older schema fields
         items = []
         for r in rows:
-            topic = r.get("topic")
-            sop_text = r.get("sop_text")
-
-            # If old schema had title/content, adapt
-            if not topic and "title" in r:
-                topic = r.get("title")
-            if not sop_text and "content" in r:
-                sop_text = r.get("content")
-
+            # Backward-compatible mapping for older schema fields
+            topic = r.get("topic") or r.get("title")
+            sop_text = r.get("sop_text") or r.get("content")
             items.append({
                 "id": r.get("id"),
                 "created_at": r.get("created_at"),
@@ -1110,11 +1117,8 @@ def sops_create():
     generate = bool(payload.get("generate", False))
     days = payload.get("days")
 
-    # IMPORTANT: Perform slow/remote work before starting a write
+    # IMPORTANT: Perform slow/remote work before starting a write transaction
     if generate:
-        # Use your existing generator (outside DB transaction)
-        # res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
-        # sop_text = res["sop_text"]
         res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
         sop_text = res.get("sop_text", "") if isinstance(res, dict) else ""
     else:
