@@ -76,6 +76,128 @@ DEFAULT_PUBLIC_ROLE = os.getenv("DEFAULT_PUBLIC_ROLE", "admin")  # or "admin" if
 ROLE_LEVEL = {"viewer": 1, "user": 2, "admin": 3}
 
 
+# -----------------------------------------------------------------------------
+# 1) GLOBAL SQLite patch: WAL + busy_timeout across the app (and other modules)
+#    Must happen BEFORE importing anything else that might call sqlite3.connect
+# -----------------------------------------------------------------------------
+_ORIG_SQLITE3_CONNECT = sqlite3.connect
+def _sqlite3_connect_patched(*args, **kwargs):
+    # Default args if not provided
+    if "timeout" not in kwargs:
+        kwargs["timeout"] = 30.0
+    # isolation_level=None lets us control BEGIN/COMMIT explicitly
+    if "isolation_level" not in kwargs:
+        kwargs["isolation_level"] = None
+    # Allow cross-thread use of the same connection if any code reuses it (avoid)
+    if "check_same_thread" not in kwargs:
+        kwargs["check_same_thread"] = False
+    conn = _ORIG_SQLITE3_CONNECT(*args, **kwargs)
+    conn.row_factory = sqlite3.Row
+    # Apply PRAGMAs. If read-only (uri mode=ro), journal_mode change is skipped.
+    try:
+        # Busy timeout for both readers and writers
+        conn.execute("PRAGMA busy_timeout=30000;")
+        # Enable WAL for writers
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+        except Exception:
+            # Ignore if read-only connection or already set
+            pass
+        # Reasonable durability/perf balance for WAL
+        conn.execute("PRAGMA synchronous=NORMAL;")
+    except Exception:
+        pass
+    return conn
+sqlite3.connect = _sqlite3_connect_patched  # Monkey-patch globally
+# -----------------------------------------------------------------------------
+# 2) Cross-process write lock middleware (prevents multi-worker writer conflicts)
+# -----------------------------------------------------------------------------
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except Exception:
+    _HAS_FCNTL = False
+class FileWriteLockMiddleware:
+    """
+    Serialize write requests across processes using an advisory file lock.
+    Only engages for methods that can write: POST/PUT/PATCH/DELETE.
+    """
+    def __init__(self, app, lock_path: str = None, enabled: bool = True, timeout_sec: int = 30):
+        self.app = app
+        self.enabled = enabled
+        self.timeout_sec = timeout_sec
+        # One lock file per DB file
+        self.lock_path = lock_path or (DB_PATH + ".lock")
+        self._inproc_lock = threading.Lock()
+        # Ensure lock file exists
+        try:
+            open(self.lock_path, "a").close()
+        except Exception:
+            pass
+    def __call__(self, environ, start_response):
+        method = environ.get("REQUEST_METHOD", "GET").upper()
+        needs_lock = method in ("POST", "PUT", "PATCH", "DELETE")
+        if not self.enabled or not needs_lock:
+            return self.app(environ, start_response)
+        # Acquire cross-process lock with timeout
+        lock_file = None
+        got_lock = False
+        start = time.time()
+        try:
+            # Always take an in-process lock first to reduce thrashing
+            self._inproc_lock.acquire()
+            if _HAS_FCNTL:
+                lock_file = open(self.lock_path, "a+")
+                while True:
+                    try:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        got_lock = True
+                        break
+                    except BlockingIOError:
+                        if time.time() - start > self.timeout_sec:
+                            break
+                        time.sleep(0.05)  # backoff
+            else:
+                # Fallback if fcntl is unavailable (e.g., non-Unix); in-proc lock only
+                got_lock = True
+            if not got_lock:
+                # Fail fast with a 503 to signal retry
+                status = "503 Service Unavailable"
+                headers = [("Content-Type", "application/json")]
+                start_response(status, headers)
+                return [b'{"status":"error","error":"write lock timeout"}']
+            # Call downstream app; ensure we release lock after response iterates
+            result_iter = self.app(environ, start_response)
+            def _close_iter():
+                try:
+                    for chunk in result_iter:
+                        yield chunk
+                finally:
+                    try:
+                        if _HAS_FCNTL and lock_file:
+                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                            lock_file.close()
+                    except Exception:
+                        pass
+                    try:
+                        self._inproc_lock.release()
+                    except Exception:
+                        pass
+            return _close_iter()
+        except Exception:
+            # On any exception, release locks
+            try:
+                if _HAS_FCNTL and lock_file:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    lock_file.close()
+            except Exception:
+                pass
+            try:
+                self._inproc_lock.release()
+            except Exception:
+                pass
+            raise
+
 
 # Role resolution no longer used; kept only to satisfy references
 # Keep a harmless role function for compatibility with any code that calls it
@@ -963,46 +1085,61 @@ def dashboard_reports_export_csv():
 # SOP Library (list/create/edit/delete)
 # ---------------------------
 
+# Enable write lock middleware for this app (can be toggled with env)
+if os.getenv("DISABLE_WRITE_LOCK_MW", "0") != "1":
+    app.wsgi_app = FileWriteLockMiddleware(app.wsgi_app, lock_path=DB_PATH + ".lock")
 # -----------------------------------------------------------------------------
-# SQLite helpers: WAL, busy_timeout, short transactions
+# 4) DB helpers: per-request connections + short, explicit transactions
 # -----------------------------------------------------------------------------
 _WRITE_LOCK = threading.Lock()
-
 def connect_db(read_only: bool = False) -> sqlite3.Connection:
-    """
-    Short-lived SQLite connection with WAL + busy_timeout.
-    isolation_level=None => we control transactions explicitly.
-    """
     if read_only:
-        uri = f"file:{DB_PATH}?mode=ro"
-        conn = sqlite3.connect(
-            uri, uri=True, timeout=30, check_same_thread=False, isolation_level=None
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=30000;")
-        return conn
-
-    conn = sqlite3.connect(
-        DB_PATH, timeout=30, check_same_thread=False, isolation_level=None
-    )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=30000;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    return conn
-
+        # Read-only URI; patched connect still applies busy_timeout
+        return sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    return sqlite3.connect(DB_PATH)
+@contextmanager
+def db_read():
+    conn = connect_db(read_only=True)
+    try:
+        yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+@contextmanager
+def db_write():
+    """
+    Short write txn with in-process lock and BEGIN IMMEDIATE (grabs writer lock up front)
+    The WSGI middleware above serializes writes across processes.
+    """
+    conn = connect_db(read_only=False)
+    try:
+        with _WRITE_LOCK:
+            conn.execute("BEGIN IMMEDIATE;")
+            yield conn
+            conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+# -----------------------------------------------------------------------------
+# 5) Idempotent migration for SOPs table (fixes missing columns on existing DBs)
+# -----------------------------------------------------------------------------
 def _columns(conn: sqlite3.Connection, table: str) -> set:
     cols = set()
-    for r in conn.execute(f"PRAGMA table_info({table})").fetchall():
-        # r = (cid, name, type, notnull, dflt_value, pk) OR Row
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    for r in rows:
         cols.add(r[1] if isinstance(r, tuple) else r["name"])
     return cols
-
 def _ensure_sops_table(conn: sqlite3.Connection | None = None):
-    """
-    Ensure 'sops' exists and migrate legacy schemas by adding missing columns.
-    Safe to call frequently.
-    """
     local = None
     try:
         if conn is None:
@@ -1010,18 +1147,14 @@ def _ensure_sops_table(conn: sqlite3.Connection | None = None):
             c = local
         else:
             c = conn
-
-        # Create minimal table if missing
+        # Create minimal shell if table doesn't exist
         c.execute("""
             CREATE TABLE IF NOT EXISTS sops (
                 id INTEGER PRIMARY KEY AUTOINCREMENT
             )
         """)
-
         cols = _columns(c, "sops")
         alters = []
-
-        # Required columns for the dashboard
         if "created_at" not in cols:
             alters.append("ADD COLUMN created_at INTEGER")
         if "updated_at" not in cols:
@@ -1040,103 +1173,56 @@ def _ensure_sops_table(conn: sqlite3.Connection | None = None):
             alters.append("ADD COLUMN status TEXT")
         if "sop_text" not in cols:
             alters.append("ADD COLUMN sop_text TEXT")
-
         for stmt in alters:
             c.execute(f"ALTER TABLE sops {stmt}")
-
         if local:
             local.commit()
     finally:
         if local:
             local.close()
-
-@contextmanager
-def db_read():
-    conn = connect_db(read_only=True)
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-@contextmanager
-def db_write():
-    """
-    Use a short write transaction and serialize writers in-process.
-    BEGIN IMMEDIATE takes the write lock up front to reduce deadlocks.
-    """
-    conn = connect_db(read_only=False)
-    try:
-        with _WRITE_LOCK:
-            conn.execute("BEGIN IMMEDIATE;")
-            yield conn
-            conn.commit()
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        raise
-    finally:
-        conn.close()
-
 # -----------------------------------------------------------------------------
-# Utilities
+# 6) SOP endpoints (search + create + update + delete), LLM generation outside DB
 # -----------------------------------------------------------------------------
 def _parse_date_yyyy_mm_dd(s: str) -> int | None:
     try:
         if not s:
             return None
-        # Midnight localtime; adjust if you need strict UTC
         return int(time.mktime(time.strptime(s, "%Y-%m-%d")))
     except Exception:
         return None
-
-# -----------------------------------------------------------------------------
-# SOP Endpoints (compatible with app.js)
-# -----------------------------------------------------------------------------
-# GET /dashboard/api/sops? q=... &status=... &start=YYYY-MM-DD &end=YYYY-MM-DD
 @dashboard_api.get("/sops")
 def sops_list():
     q = (request.args.get("q") or "").strip()
     status = (request.args.get("status") or "").strip()
     start_iso = (request.args.get("start") or "").strip()
     end_iso = (request.args.get("end") or "").strip()
-
-    start = _parse_date_yyyy_mm_dd(start_iso)
-    end = _parse_date_yyyy_mm_dd(end_iso)
-    if end is not None:
-        end = end + 86399  # include end-of-day
-
+    start_ts = _parse_date_yyyy_mm_dd(start_iso)
+    end_ts = _parse_date_yyyy_mm_dd(end_iso)
+    if end_ts is not None:
+        end_ts += 86399  # include entire end day
     sql = "SELECT * FROM sops WHERE 1=1"
     params = []
-
     if q:
         like = f"%{q}%"
         sql += " AND (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?)"
         params += [like, like, like]
-
     if status:
         sql += " AND status = ?"
         params.append(status)
-
-    if start is not None and end is not None:
+    if start_ts is not None and end_ts is not None:
         sql += " AND created_at BETWEEN ? AND ?"
-        params += [start, end]
-    elif start is not None:
+        params += [start_ts, end_ts]
+    elif start_ts is not None:
         sql += " AND created_at >= ?"
-        params.append(start)
-    elif end is not None:
+        params.append(start_ts)
+    elif end_ts is not None:
         sql += " AND created_at <= ?"
-        params.append(end)
-
+        params.append(end_ts)
     sql += " ORDER BY created_at DESC LIMIT 500"
-
     try:
         with db_read() as conn:
             _ensure_sops_table(conn)
             rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
-
-        # Map legacy fields if present
         items = []
         for r in rows:
             topic = r.get("topic") or r.get("title")
@@ -1153,47 +1239,40 @@ def sops_list():
                 "status": r.get("status"),
                 "sop_text": sop_text,
             })
-
         return jsonify({"status": "ok", "items": items})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
-
-# POST /dashboard/api/sops
 @dashboard_api.post("/sops")
 def sops_create():
     payload = request.get_json() or {}
-
     topic = (payload.get("topic") or "").strip()
     if not topic:
         return jsonify({"error": "topic is required"}), 400
-
     channel_id = (payload.get("channel_id") or "").strip() or None
     tags = (payload.get("tags") or "").strip()
     author_user_id = (payload.get("author_user_id") or "").strip() or None
     version = (payload.get("version") or "v1").strip()
     status = (payload.get("status") or "active").strip() or "active"
-
     generate = bool(payload.get("generate", False))
     days = payload.get("days")
-
-    # IMPORTANT: do LLM generation BEFORE opening a write transaction
+    # LLM generation OUTSIDE DB write
     sop_text = (payload.get("sop_text") or "").strip()
     if generate:
         try:
-            # Replace with your actual service; ensure it returns dict with sop_text
+            # If sop_service is available in your app context, it will be used
             # res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
             # sop_text = res.get("sop_text", "")
-            res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
-            sop_text = res.get("sop_text", "") if isinstance(res, dict) else sop_text
-        except NameError:
-            # Fallback if sop_service not available in this file
+            res = globals().get("sop_service")
+            if res and hasattr(res, "generate_sop_text"):
+                generated = res.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
+                if isinstance(generated, dict):
+                    sop_text = generated.get("sop_text", sop_text)
+        except Exception:
+            # If generation fails, fall back to requiring sop_text
             pass
-
     if not sop_text:
-        return jsonify({"error": "sop_text required (or generate=true must provide it)"}), 400
-
+        return jsonify({"error": "sop_text required (or set generate=true)"}), 400
     now_ts = int(time.time())
-
     try:
         with db_write() as conn:
             _ensure_sops_table(conn)
@@ -1205,21 +1284,16 @@ def sops_create():
         return jsonify({"status": "ok", "id": new_id})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
-
-# PUT /dashboard/api/sops/<id>
 @dashboard_api.put("/sops/<int:sop_id>")
 def sops_update(sop_id: int):
     payload = request.get_json() or {}
     fields, values = [], []
-
     for key in ("topic", "channel_id", "tags", "author_user_id", "version", "status", "sop_text"):
         if key in payload:
             fields.append(f"{key} = ?")
             values.append(payload.get(key))
-
     if not fields:
         return jsonify({"error": "no fields to update"}), 400
-
     try:
         with db_write() as conn:
             _ensure_sops_table(conn)
@@ -1232,8 +1306,6 @@ def sops_update(sop_id: int):
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
-
-# DELETE /dashboard/api/sops/<id>
 @dashboard_api.delete("/sops/<int:sop_id>")
 def sops_delete(sop_id: int):
     try:
