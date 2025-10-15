@@ -963,35 +963,45 @@ def dashboard_reports_export_csv():
 # SOP Library (list/create/edit/delete)
 # ---------------------------
 
-
+# -----------------------------------------------------------------------------
+# SQLite helpers: WAL, busy_timeout, short transactions
+# -----------------------------------------------------------------------------
 _WRITE_LOCK = threading.Lock()
 
 def connect_db(read_only: bool = False) -> sqlite3.Connection:
+    """
+    Short-lived SQLite connection with WAL + busy_timeout.
+    isolation_level=None => we control transactions explicitly.
+    """
     if read_only:
         uri = f"file:{DB_PATH}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=30, check_same_thread=False, isolation_level=None)
+        conn = sqlite3.connect(
+            uri, uri=True, timeout=30, check_same_thread=False, isolation_level=None
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=30000;")
         return conn
 
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False, isolation_level=None)
+    conn = sqlite3.connect(
+        DB_PATH, timeout=30, check_same_thread=False, isolation_level=None
+    )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=30000;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
-def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+def _columns(conn: sqlite3.Connection, table: str) -> set:
     cols = set()
     for r in conn.execute(f"PRAGMA table_info({table})").fetchall():
-        # r: cid, name, type, notnull, dflt_value, pk
+        # r = (cid, name, type, notnull, dflt_value, pk) OR Row
         cols.add(r[1] if isinstance(r, tuple) else r["name"])
     return cols
 
 def _ensure_sops_table(conn: sqlite3.Connection | None = None):
     """
-    Ensure sops table exists and migrate legacy schemas by adding missing columns.
-    Safe to call often.
+    Ensure 'sops' exists and migrate legacy schemas by adding missing columns.
+    Safe to call frequently.
     """
     local = None
     try:
@@ -1001,7 +1011,7 @@ def _ensure_sops_table(conn: sqlite3.Connection | None = None):
         else:
             c = conn
 
-        # Create table if missing (minimal schema)
+        # Create minimal table if missing
         c.execute("""
             CREATE TABLE IF NOT EXISTS sops (
                 id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -1009,29 +1019,29 @@ def _ensure_sops_table(conn: sqlite3.Connection | None = None):
         """)
 
         cols = _columns(c, "sops")
+        alters = []
 
-        # Add any missing columns used by the app
-        schema_adds = []
+        # Required columns for the dashboard
         if "created_at" not in cols:
-            schema_adds.append("ADD COLUMN created_at INTEGER")
+            alters.append("ADD COLUMN created_at INTEGER")
         if "updated_at" not in cols:
-            schema_adds.append("ADD COLUMN updated_at INTEGER")
+            alters.append("ADD COLUMN updated_at INTEGER")
         if "topic" not in cols:
-            schema_adds.append("ADD COLUMN topic TEXT")
+            alters.append("ADD COLUMN topic TEXT")
         if "channel_id" not in cols:
-            schema_adds.append("ADD COLUMN channel_id TEXT")
+            alters.append("ADD COLUMN channel_id TEXT")
         if "tags" not in cols:
-            schema_adds.append("ADD COLUMN tags TEXT")
+            alters.append("ADD COLUMN tags TEXT")
         if "author_user_id" not in cols:
-            schema_adds.append("ADD COLUMN author_user_id TEXT")
+            alters.append("ADD COLUMN author_user_id TEXT")
         if "version" not in cols:
-            schema_adds.append("ADD COLUMN version TEXT")
+            alters.append("ADD COLUMN version TEXT")
         if "status" not in cols:
-            schema_adds.append("ADD COLUMN status TEXT")
+            alters.append("ADD COLUMN status TEXT")
         if "sop_text" not in cols:
-            schema_adds.append("ADD COLUMN sop_text TEXT")
+            alters.append("ADD COLUMN sop_text TEXT")
 
-        for stmt in schema_adds:
+        for stmt in alters:
             c.execute(f"ALTER TABLE sops {stmt}")
 
         if local:
@@ -1050,6 +1060,10 @@ def db_read():
 
 @contextmanager
 def db_write():
+    """
+    Use a short write transaction and serialize writers in-process.
+    BEGIN IMMEDIATE takes the write lock up front to reduce deadlocks.
+    """
     conn = connect_db(read_only=False)
     try:
         with _WRITE_LOCK:
@@ -1065,17 +1079,22 @@ def db_write():
     finally:
         conn.close()
 
-
-
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
 def _parse_date_yyyy_mm_dd(s: str) -> int | None:
     try:
         if not s:
             return None
-        # midnight UTC
+        # Midnight localtime; adjust if you need strict UTC
         return int(time.mktime(time.strptime(s, "%Y-%m-%d")))
     except Exception:
         return None
 
+# -----------------------------------------------------------------------------
+# SOP Endpoints (compatible with app.js)
+# -----------------------------------------------------------------------------
+# GET /dashboard/api/sops? q=... &status=... &start=YYYY-MM-DD &end=YYYY-MM-DD
 @dashboard_api.get("/sops")
 def sops_list():
     q = (request.args.get("q") or "").strip()
@@ -1086,7 +1105,7 @@ def sops_list():
     start = _parse_date_yyyy_mm_dd(start_iso)
     end = _parse_date_yyyy_mm_dd(end_iso)
     if end is not None:
-        end = end + 86399  # include end of day
+        end = end + 86399  # include end-of-day
 
     sql = "SELECT * FROM sops WHERE 1=1"
     params = []
@@ -1139,7 +1158,7 @@ def sops_list():
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
-
+# POST /dashboard/api/sops
 @dashboard_api.post("/sops")
 def sops_create():
     payload = request.get_json() or {}
@@ -1153,18 +1172,25 @@ def sops_create():
     author_user_id = (payload.get("author_user_id") or "").strip() or None
     version = (payload.get("version") or "v1").strip()
     status = (payload.get("status") or "active").strip() or "active"
+
     generate = bool(payload.get("generate", False))
     days = payload.get("days")
 
-    # LLM generation outside any DB transaction
+    # IMPORTANT: do LLM generation BEFORE opening a write transaction
+    sop_text = (payload.get("sop_text") or "").strip()
     if generate:
-        # Uses your existing service; adapt if its signature differs
-        res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
-        sop_text = res.get("sop_text", "") if isinstance(res, dict) else ""
-    else:
-        sop_text = (payload.get("sop_text") or "").strip()
-        if not sop_text:
-            return jsonify({"error": "sop_text required when generate=false"}), 400
+        try:
+            # Replace with your actual service; ensure it returns dict with sop_text
+            # res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
+            # sop_text = res.get("sop_text", "")
+            res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
+            sop_text = res.get("sop_text", "") if isinstance(res, dict) else sop_text
+        except NameError:
+            # Fallback if sop_service not available in this file
+            pass
+
+    if not sop_text:
+        return jsonify({"error": "sop_text required (or generate=true must provide it)"}), 400
 
     now_ts = int(time.time())
 
@@ -1176,12 +1202,11 @@ def sops_create():
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (now_ts, now_ts, topic, channel_id, tags, author_user_id, version, status, sop_text))
             new_id = cur.lastrowid
-
         return jsonify({"status": "ok", "id": new_id})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
-
+# PUT /dashboard/api/sops/<id>
 @dashboard_api.put("/sops/<int:sop_id>")
 def sops_update(sop_id: int):
     payload = request.get_json() or {}
@@ -1208,7 +1233,7 @@ def sops_update(sop_id: int):
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
-
+# DELETE /dashboard/api/sops/<id>
 @dashboard_api.delete("/sops/<int:sop_id>")
 def sops_delete(sop_id: int):
     try:
