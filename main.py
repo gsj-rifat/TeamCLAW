@@ -1155,12 +1155,19 @@ def _ensure_sops_table(conn: sqlite3.Connection | None = None):
         """)
         cols = _columns(c, "sops")
         alters = []
+        # Timestamps
         if "created_at" not in cols:
             alters.append("ADD COLUMN created_at INTEGER")
         if "updated_at" not in cols:
             alters.append("ADD COLUMN updated_at INTEGER")
+        # Title (legacy DBs sometimes have NOT NULL here)
+        # We just ensure the column exists; leave existing constraints as-is.
+        if "title" not in cols:
+            alters.append("ADD COLUMN title TEXT")
+        # Topic (newer code uses topic; we keep both for compatibility)
         if "topic" not in cols:
             alters.append("ADD COLUMN topic TEXT")
+        # Other fields
         if "channel_id" not in cols:
             alters.append("ADD COLUMN channel_id TEXT")
         if "tags" not in cols:
@@ -1173,13 +1180,16 @@ def _ensure_sops_table(conn: sqlite3.Connection | None = None):
             alters.append("ADD COLUMN status TEXT")
         if "sop_text" not in cols:
             alters.append("ADD COLUMN sop_text TEXT")
+
         for stmt in alters:
             c.execute(f"ALTER TABLE sops {stmt}")
+
         if local:
             local.commit()
     finally:
         if local:
             local.close()
+
 # -----------------------------------------------------------------------------
 # 6) SOP endpoints (search + create + update + delete), LLM generation outside DB
 # -----------------------------------------------------------------------------
@@ -1265,9 +1275,14 @@ def sops_list():
 @dashboard_api.post("/sops")
 def sops_create():
     payload = request.get_json() or {}
+
     topic = (payload.get("topic") or "").strip()
-    if not topic:
-        return jsonify({"error": "topic is required"}), 400
+    # Accept either "title" or "topic" from the client; default title <- topic
+    title = (payload.get("title") or topic).strip()
+
+    if not title and not topic:
+        return jsonify({"error": "topic or title is required"}), 400
+
     channel_id = (payload.get("channel_id") or "").strip() or None
     tags = (payload.get("tags") or "").strip()
     author_user_id = (payload.get("author_user_id") or "").strip() or None
@@ -1275,40 +1290,43 @@ def sops_create():
     status = (payload.get("status") or "active").strip() or "active"
     generate = bool(payload.get("generate", False))
     days = payload.get("days")
+
     # LLM generation OUTSIDE DB write
     sop_text = (payload.get("sop_text") or "").strip()
     if generate:
         try:
             # If sop_service is available in your app context, it will be used
-            # res = sop_service.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
-            # sop_text = res.get("sop_text", "")
             res = globals().get("sop_service")
             if res and hasattr(res, "generate_sop_text"):
-                generated = res.generate_sop_text(topic=topic, channel_id=channel_id, days=days)
+                generated = res.generate_sop_text(topic=(topic or title), channel_id=channel_id, days=days)
                 if isinstance(generated, dict):
                     sop_text = generated.get("sop_text", sop_text)
         except Exception:
             # If generation fails, fall back to requiring sop_text
             pass
+
     if not sop_text:
         return jsonify({"error": "sop_text required (or set generate=true)"}), 400
+
     now_ts = int(time.time())
     try:
         with db_write() as conn:
             _ensure_sops_table(conn)
             cur = conn.execute("""
-                INSERT INTO sops (created_at, updated_at, topic, channel_id, tags, author_user_id, version, status, sop_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (now_ts, now_ts, topic, channel_id, tags, author_user_id, version, status, sop_text))
+                INSERT INTO sops (created_at, updated_at, title, topic, channel_id, tags, author_user_id, version, status, sop_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (now_ts, now_ts, title, topic or title, channel_id, tags, author_user_id, version, status, sop_text))
             new_id = cur.lastrowid
         return jsonify({"status": "ok", "id": new_id})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
 @dashboard_api.put("/sops/<int:sop_id>")
 def sops_update(sop_id: int):
     payload = request.get_json() or {}
     fields, values = [], []
-    for key in ("topic", "channel_id", "tags", "author_user_id", "version", "status", "sop_text"):
+    for key in ("title", "topic", "channel_id", "tags", "author_user_id", "version", "status", "sop_text"):
         if key in payload:
             fields.append(f"{key} = ?")
             values.append(payload.get(key))
