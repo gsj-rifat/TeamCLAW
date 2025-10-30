@@ -1190,25 +1190,31 @@ def _parse_date_yyyy_mm_dd(s: str) -> int | None:
         return int(time.mktime(time.strptime(s, "%Y-%m-%d")))
     except Exception:
         return None
+
 @dashboard_api.get("/sops")
 def sops_list():
     q = (request.args.get("q") or "").strip()
     status = (request.args.get("status") or "").strip()
     start_iso = (request.args.get("start") or "").strip()
     end_iso = (request.args.get("end") or "").strip()
+
     start_ts = _parse_date_yyyy_mm_dd(start_iso)
     end_ts = _parse_date_yyyy_mm_dd(end_iso)
     if end_ts is not None:
         end_ts += 86399  # include entire end day
+
     sql = "SELECT * FROM sops WHERE 1=1"
     params = []
+
     if q:
         like = f"%{q}%"
         sql += " AND (topic LIKE ? OR tags LIKE ? OR sop_text LIKE ?)"
         params += [like, like, like]
+
     if status:
         sql += " AND status = ?"
         params.append(status)
+
     if start_ts is not None and end_ts is not None:
         sql += " AND created_at BETWEEN ? AND ?"
         params += [start_ts, end_ts]
@@ -1218,11 +1224,17 @@ def sops_list():
     elif end_ts is not None:
         sql += " AND created_at <= ?"
         params.append(end_ts)
+
     sql += " ORDER BY created_at DESC LIMIT 500"
+
     try:
-        with db_read() as conn:
-            _ensure_sops_table(conn)
-            rows = [dict(r) for r in conn.execute(sql, params).fetchall()]
+        # Use the same connection style as other dashboard endpoints so row_factory is set.
+        conn = reports_service._connect()
+        _ensure_sops_table(conn)
+        cur = conn.cursor()
+        cur.execute(sql, params)
+
+        rows = [dict(r) for r in cur.fetchall()]
         items = []
         for r in rows:
             topic = r.get("topic") or r.get("title")
@@ -1239,9 +1251,17 @@ def sops_list():
                 "status": r.get("status"),
                 "sop_text": sop_text,
             })
+
         return jsonify({"status": "ok", "items": items})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @dashboard_api.post("/sops")
 def sops_create():
     payload = request.get_json() or {}
