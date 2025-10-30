@@ -1139,7 +1139,14 @@ def _columns(conn: sqlite3.Connection, table: str) -> set:
     for r in rows:
         cols.add(r[1] if isinstance(r, tuple) else r["name"])
     return cols
+
+
 def _ensure_sops_table(conn: sqlite3.Connection | None = None):
+    """
+    Make sure the sops table has all expected columns.
+    We DO NOT drop/recreate (to keep data & constraints).
+    We only add missing columns; existing NOT NULL constraints remain.
+    """
     local = None
     try:
         if conn is None:
@@ -1147,27 +1154,38 @@ def _ensure_sops_table(conn: sqlite3.Connection | None = None):
             c = local
         else:
             c = conn
-        # Create minimal shell if table doesn't exist
+
+        # Create a minimal table shell if it doesn't exist yet
         c.execute("""
             CREATE TABLE IF NOT EXISTS sops (
                 id INTEGER PRIMARY KEY AUTOINCREMENT
             )
         """)
+
         cols = _columns(c, "sops")
         alters = []
+
         # Timestamps
         if "created_at" not in cols:
             alters.append("ADD COLUMN created_at INTEGER")
         if "updated_at" not in cols:
             alters.append("ADD COLUMN updated_at INTEGER")
-        # Title (legacy DBs sometimes have NOT NULL here)
-        # We just ensure the column exists; leave existing constraints as-is.
+
+        # Title/Topic compatibility (older vs newer code)
         if "title" not in cols:
             alters.append("ADD COLUMN title TEXT")
-        # Topic (newer code uses topic; we keep both for compatibility)
         if "topic" not in cols:
             alters.append("ADD COLUMN topic TEXT")
-        # Other fields
+
+        # Legacy column that some DBs have as NOT NULL
+        if "content" not in cols:
+            alters.append("ADD COLUMN content TEXT")
+
+        # Newer column name used by dashboard/service
+        if "sop_text" not in cols:
+            alters.append("ADD COLUMN sop_text TEXT")
+
+        # Metadata
         if "channel_id" not in cols:
             alters.append("ADD COLUMN channel_id TEXT")
         if "tags" not in cols:
@@ -1178,8 +1196,6 @@ def _ensure_sops_table(conn: sqlite3.Connection | None = None):
             alters.append("ADD COLUMN version TEXT")
         if "status" not in cols:
             alters.append("ADD COLUMN status TEXT")
-        if "sop_text" not in cols:
-            alters.append("ADD COLUMN sop_text TEXT")
 
         for stmt in alters:
             c.execute(f"ALTER TABLE sops {stmt}")
@@ -1189,6 +1205,7 @@ def _ensure_sops_table(conn: sqlite3.Connection | None = None):
     finally:
         if local:
             local.close()
+
 
 # -----------------------------------------------------------------------------
 # 6) SOP endpoints (search + create + update + delete), LLM generation outside DB
@@ -1277,7 +1294,6 @@ def sops_create():
     payload = request.get_json() or {}
 
     topic = (payload.get("topic") or "").strip()
-    # Accept either "title" or "topic" from the client; default title <- topic
     title = (payload.get("title") or topic).strip()
 
     if not title and not topic:
@@ -1291,59 +1307,98 @@ def sops_create():
     generate = bool(payload.get("generate", False))
     days = payload.get("days")
 
-    # LLM generation OUTSIDE DB write
-    sop_text = (payload.get("sop_text") or "").strip()
-    if generate:
+    # Determine SOP body text (accept both names for compatibility)
+    sop_text = (payload.get("sop_text") or payload.get("content") or "").strip()
+
+    # Optional LLM generation
+    if generate and not sop_text:
         try:
-            # If sop_service is available in your app context, it will be used
-            res = globals().get("sop_service")
-            if res and hasattr(res, "generate_sop_text"):
-                generated = res.generate_sop_text(topic=(topic or title), channel_id=channel_id, days=days)
+            service = globals().get("sop_service")
+            if service and hasattr(service, "generate_sop_text"):
+                generated = service.generate_sop_text(topic=(topic or title), channel_id=channel_id, days=days)
                 if isinstance(generated, dict):
-                    sop_text = generated.get("sop_text", sop_text)
+                    sop_text = (generated.get("sop_text") or generated.get("content") or sop_text or "").strip()
         except Exception:
-            # If generation fails, fall back to requiring sop_text
+            # If generation fails, require a body explicitly
             pass
 
     if not sop_text:
-        return jsonify({"error": "sop_text required (or set generate=true)"}), 400
+        return jsonify({"error": "sop_text (or content) is required"}), 400
 
     now_ts = int(time.time())
     try:
         with db_write() as conn:
             _ensure_sops_table(conn)
+            # Write BOTH columns to satisfy legacy NOT NULL(content) schemas and keep new code happy
             cur = conn.execute("""
-                INSERT INTO sops (created_at, updated_at, title, topic, channel_id, tags, author_user_id, version, status, sop_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (now_ts, now_ts, title, topic or title, channel_id, tags, author_user_id, version, status, sop_text))
+                INSERT INTO sops (
+                    created_at, updated_at, title, topic,
+                    channel_id, tags, author_user_id, version, status,
+                    sop_text, content
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                now_ts, now_ts, title, (topic or title),
+                channel_id, tags, author_user_id, version, status,
+                sop_text, sop_text  # keep in sync
+            ))
             new_id = cur.lastrowid
         return jsonify({"status": "ok", "id": new_id})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+
 @dashboard_api.put("/sops/<int:sop_id>")
 def sops_update(sop_id: int):
     payload = request.get_json() or {}
+
     fields, values = [], []
-    for key in ("title", "topic", "channel_id", "tags", "author_user_id", "version", "status", "sop_text"):
+
+    # Keep SOP body in sync: if either sop_text or content is provided,
+    # write the SAME value into BOTH columns.
+    if ("sop_text" in payload) or ("content" in payload):
+        body = payload.get("sop_text")
+        if body is None:
+            body = payload.get("content")
+        # Normalize to string and trim
+        if body is None:
+            body = ""
+        if isinstance(body, str):
+            body = body.strip()
+        fields.append("sop_text = ?")
+        values.append(body)
+        fields.append("content = ?")
+        values.append(body)
+
+    # Other updatable fields (unchanged behavior)
+    for key in ("title", "topic", "channel_id", "tags", "author_user_id", "version", "status"):
         if key in payload:
+            val = payload.get(key)
+            if isinstance(val, str):
+                val = val.strip()
             fields.append(f"{key} = ?")
-            values.append(payload.get(key))
+            values.append(val)
+
     if not fields:
         return jsonify({"error": "no fields to update"}), 400
+
     try:
         with db_write() as conn:
             _ensure_sops_table(conn)
+            # Maintain your "updated_at" convention
+            fields.append("updated_at = ?")
             values.append(int(time.time()))
             values.append(sop_id)
             conn.execute(
-                f"UPDATE sops SET {', '.join(fields)}, updated_at = ? WHERE id = ?",
+                f"UPDATE sops SET {', '.join(fields)} WHERE id = ?",
                 values
             )
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+
 @dashboard_api.delete("/sops/<int:sop_id>")
 def sops_delete(sop_id: int):
     try:
