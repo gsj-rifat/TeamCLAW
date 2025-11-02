@@ -3,6 +3,9 @@ import json
 from dotenv import load_dotenv
 from groq_llm import GroqLLM
 from datetime import datetime
+from jira_sync import sync_jira_for_extracted_insights
+import sqlite3, time
+
 
 load_dotenv()
 
@@ -61,32 +64,62 @@ Response:"""
         Returns JSON {Decisions, ToDos, SOPs, Facts}
         """
         extraction_prompt = f"""
-Analyze the following Slack conversation transcript.
-For each message, extract and categorize into:
-- Decisions (choices made or agreed upon)
-- To-Dos (tasks to be completed)
-- SOPs (Standard Operating Procedures stated or referenced)
-- Facts (objective statements)
+    Analyze the following Slack conversation transcript.
+    For each message, extract and categorize into:
+    - Decisions (choices made or agreed upon)
+    - To-Dos (tasks to be completed)
+    - SOPs (Standard Operating Procedures stated or referenced)
+    - Facts (objective statements)
 
-Provide output as a JSON object with each key being a category, and the value being a list of extracted items: original text and brief rationale.
-Strictly use this format:
-{{
-  "Decisions": [{{"text": "...", "reason": "..."}}, ...],
-  "ToDos": [{{"text": "...", "reason": "..."}}, ...],
-  "SOPs": [{{"text": "...", "reason": "..."}}, ...],
-  "Facts": [{{"text": "...", "reason": "..."}}, ...]
-}}
-Omit any category with no results.
+    Provide output as a JSON object with each key being a category, and the value being a list of extracted items: original text and brief rationale.
+    Strictly use this format:
+    {{
+      "Decisions": [{{"text": "...", "reason": "..."}}, ...],
+      "ToDos": [{{"text": "...", "reason": "..."}}, ...],
+      "SOPs": [{{"text": "...", "reason": "..."}}, ...],
+      "Facts": [{{"text": "...", "reason": "..."}}, ...]
+    }}
+    Omit any category with no results.
 
-Transcript:
-{transcript}
+    Transcript:
+    {transcript}
 
-Respond with valid JSON only.
+    Respond with valid JSON only.
         """
         try:
             print("🧠 Running structured extraction prompt...")
             response = self.llm.generate(extraction_prompt, temperature=0.3, max_tokens=700)
-            return json.loads(response)
+            extracted = json.loads(response)
+
+            # -----------------------------
+            # 🧩 Jira Sync Integration
+            # -----------------------------
+            try:
+                print("📡 Syncing extracted insights with Jira...")
+                # Build minimal "insights" dict and dummy Slack context
+                insights = {
+                    "todos": [{"text": t["text"]} for t in extracted.get("ToDos", [])]
+                }
+                # Dummy Slack context (in your real app, you can replace with actual Slack info)
+                slack_ctx = {
+                    "channel_id": "C1234567890",
+                    "message_ts": str(time.time()),
+                    "permalink": "",
+                    "author": "system",
+                    "ts_human": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                # Open DB connection and run Jira sync
+                conn = sqlite3.connect(os.getenv("DB_PATH", "insights.db"))
+                sync_jira_for_extracted_insights(conn, insights, slack_ctx)
+                conn.commit()
+                conn.close()
+                print("✅ Jira sync complete.")
+            except Exception as je:
+                print(f"⚠️ Jira sync skipped or failed: {je}")
+            # -----------------------------
+
+            return extracted
+
         except Exception as e:
             print(f"❌ Extraction failed: {e}")
             return {"error": "Extraction failed", "raw_response": response if 'response' in locals() else ""}
