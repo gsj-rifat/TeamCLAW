@@ -14,6 +14,8 @@ from datetime import datetime, timezone, timedelta
 from flask import Flask, request, jsonify, Blueprint, send_from_directory, redirect, abort
 import sqlite3, threading, time
 from contextlib import contextmanager
+from jira_client import JiraClient
+
 
 
 
@@ -1658,6 +1660,158 @@ def summaries_create():
         return jsonify({"status":"ok","id":sid})
     except Exception as e:
         return jsonify({"status":"error","error":str(e)}), 500
+
+
+# ---------------------------
+# Jira Integration
+# ---------------------------
+
+def _ensure_jira_tables(conn: sqlite3.Connection | None = None):
+    local = None
+    try:
+        if conn is None:
+            local = connect_db(read_only=False)
+            c = local
+        else:
+            c = conn
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS jira_issues (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              created_at INTEGER,
+              updated_at INTEGER,
+              jira_key TEXT UNIQUE,
+              jira_id TEXT UNIQUE,
+              project_key TEXT,
+              summary TEXT,
+              description TEXT,
+              status TEXT,
+              assignee TEXT,
+              priority TEXT,
+              labels TEXT,
+              due_date TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS jira_links (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              created_at INTEGER,
+              updated_at INTEGER,
+              insight_id INTEGER,
+              slack_message_ts TEXT,
+              slack_channel_id TEXT,
+              jira_key TEXT,
+              UNIQUE (insight_id, jira_key)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS jira_dedup (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              created_at INTEGER,
+              hash TEXT UNIQUE,
+              jira_key TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_jira_issues_key ON jira_issues(jira_key)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_jira_issues_status ON jira_issues(status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_jira_links_ts ON jira_links(slack_message_ts)")
+        if local:
+            local.commit()
+    finally:
+        if local:
+            local.close()
+
+def _upsert_jira_issue(conn, now_ts, key, issue_id, project_key, summary, description,
+                       status=None, assignee=None, priority=None, labels=None, due_date=None):
+    conn.execute("""
+        INSERT INTO jira_issues (created_at, updated_at, jira_key, jira_id, project_key,
+                                 summary, description, status, assignee, priority, labels, due_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(jira_key) DO UPDATE SET
+            updated_at=excluded.updated_at,
+            summary=excluded.summary,
+            description=excluded.description,
+            status=COALESCE(excluded.status, jira_issues.status),
+            assignee=COALESCE(excluded.assignee, jira_issues.assignee),
+            priority=COALESCE(excluded.priority, jira_issues.priority),
+            labels=COALESCE(excluded.labels, jira_issues.labels),
+            due_date=COALESCE(excluded.due_date, jira_issues.due_date)
+    """, (now_ts, now_ts, key, issue_id, project_key, summary, description,
+          status, assignee, priority, labels, due_date))
+
+
+@dashboard_api.get("/jira/issues")
+def jira_list_issues():
+    """List cached Jira issues from our mirror table for the dashboard."""
+    try:
+        with db_read() as conn:
+            _ensure_jira_tables(conn)
+            q = (request.args.get("q") or "").strip()
+            status = (request.args.get("status") or "").strip()
+            assignee = (request.args.get("assignee") or "").strip()
+            limit = int(request.args.get("limit") or 100)
+
+            sql = "SELECT * FROM jira_issues WHERE 1=1"
+            params = []
+            if q:
+                like = f"%{q}%"
+                sql += " AND (jira_key LIKE ? OR summary LIKE ? OR description LIKE ?)"
+                params += [like, like, like]
+            if status:
+                sql += " AND status = ?"
+                params.append(status)
+            if assignee:
+                sql += " AND assignee = ?"
+                params.append(assignee)
+            sql += " ORDER BY updated_at DESC LIMIT ?"
+            params.append(limit)
+
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql, params).fetchall()
+            items = [dict(r) for r in rows]
+            return jsonify({"status": "ok", "items": items})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@dashboard_api.post("/jira/test-create")
+def jira_test_create():
+    """
+    Smoke test: create a Jira issue via PAT and store it in our mirror.
+    Request JSON:
+      { "summary": "Test from AI Shadow", "description": "Hello Jira!", "labels": ["ai-shadow"] }
+    """
+    payload = request.get_json() or {}
+    summary = (payload.get("summary") or "Test from AI Shadow").strip()
+    description = (payload.get("description") or "Hello from AI Shadow Jira test.").strip()
+    labels = payload.get("labels") or ["ai-shadow"]
+    project_key = os.getenv("JIRA_PROJECT_KEY", "")
+    issue_type = os.getenv("JIRA_DEFAULT_ISSUE_TYPE", "Task")
+
+    if not project_key:
+        return jsonify({"status": "error", "error": "Missing JIRA_PROJECT_KEY env var"}), 400
+
+    try:
+        jc = JiraClient()
+        me = jc.me()  # sanity check auth
+        resp = jc.create_issue(project_key=project_key, summary=summary,
+                               description=description, issue_type=issue_type,
+                               labels=labels)
+        key = resp["key"]; issue_id = resp["id"]
+        now_ts = int(time.time())
+
+        with db_write() as conn:
+            _ensure_jira_tables(conn)
+            _upsert_jira_issue(conn, now_ts, key, issue_id, project_key,
+                               summary, description, status="To Do",
+                               assignee=None, priority=None, labels=",".join(labels), due_date=None)
+        return jsonify({"status": "ok", "key": key, "id": issue_id, "me": me.get("displayName")})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+
+
 
 # ---------------------------
 # Global Search (insights + sops + summaries)
