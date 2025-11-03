@@ -108,7 +108,8 @@ def sync_jira_for_extracted_insights(conn: sqlite3.Connection,
         ]
         description = "\n".join([ln for ln in description_lines if ln is not None])
 
-        assignee = todo.get("assignee") or None
+        assignee = todo.get("assignee") or None  # raw user text; not reliable for Jira Cloud
+        assignee_account_id = todo.get("assignee_account_id")  # only use if you actually populate this elsewhere
         labels = ["ai-shadow", "from-slack"]
         due_date = (todo.get("due_date") or "")[:10] or None
 
@@ -132,17 +133,23 @@ def sync_jira_for_extracted_insights(conn: sqlite3.Connection,
             _link_if_possible(conn, now, todo, slack_ctx, key)
             continue
 
-        # Create new issue
+            # Create new issue in Jira
         try:
-            created = jc.create_issue(project_key=project_key, summary=summary,
-                                      description=description, issue_type=issue_type,
-                                      assignee=assignee, labels=labels, due_date=due_date)
-            key = created["key"]; issue_id = created.get("id", "")
-            print(f"🆕 Jira sync: created issue {key}")
+                created = jc.create_issue(
+                    project_key=project_key,
+                    summary=summary,
+                    description=description,
+                    issue_type=issue_type,
+                    assignee_account_id=assignee_account_id,  # None is fine
+                    labels=labels,
+                    due_date=due_date
+                )
+                key = created["key"];
+                issue_id = created.get("id", "")
+                print(f"🆕 Jira sync: created issue {key}")
         except Exception as e:
-            print(f"❌ Jira sync: create failed: {e}")
-            # On failure we *do not* upsert a phantom row; just skip
-            continue
+                print(f"❌ Jira sync: create failed: {e}")
+                continue
 
         # Mirror + dedup + link
         conn.execute("INSERT INTO jira_dedup (created_at, hash, jira_key) VALUES (?, ?, ?)", (now, h, key))
