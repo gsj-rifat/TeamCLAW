@@ -1744,8 +1744,12 @@ def _upsert_jira_issue(conn, now_ts, key, issue_id, project_key, summary, descri
 def jira_list_issues():
     """List cached Jira issues from our mirror table for the dashboard."""
     try:
+        # Ensure schema using a WRITE connection (may create tables/indices).
+        with db_write() as wconn:
+            _ensure_jira_tables(wconn)
+
+        # Now read with a READ-ONLY connection.
         with db_read() as conn:
-            _ensure_jira_tables(conn)
             q = (request.args.get("q") or "").strip()
             status = (request.args.get("status") or "").strip()
             assignee = (request.args.get("assignee") or "").strip()
@@ -1772,6 +1776,7 @@ def jira_list_issues():
             return jsonify({"status": "ok", "items": items})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
+
 
 
 @dashboard_api.post("/jira/test-create")

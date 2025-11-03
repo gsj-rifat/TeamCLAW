@@ -109,7 +109,7 @@ Response:"""
                     "ts_human": time.strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 # Open DB connection and run Jira sync
-                conn = sqlite3.connect(os.getenv("DB_PATH", "insights.db"))
+                conn = sqlite3.connect(os.getenv("INSIGHTS_DB_PATH", "insights.db"))
                 sync_jira_for_extracted_insights(conn, insights, slack_ctx)
                 conn.commit()
                 conn.close()
