@@ -77,20 +77,22 @@ def sync_jira_for_extracted_insights(conn: sqlite3.Connection,
     """
     insights: dict with lists under keys like 'todos', 'facts', 'decisions'
     slack_ctx: minimal context about the source (channel_id, message_ts, etc.)
+    RETURNS: list[str] -> Jira keys created in this call (e.g., ["KAN-2"])
     """
+    created_keys: List[str] = []
+
     raw_key = os.getenv("JIRA_PROJECT_KEY", "")
     project_key = (raw_key or "").strip()
     issue_type = (os.getenv("JIRA_DEFAULT_ISSUE_TYPE", "Task") or "Task").strip()
-    created_keys = []
 
     if not project_key:
         print("⚠️ Jira sync: JIRA_PROJECT_KEY is missing/empty. Skipping Jira create/update and mirror upsert.")
-        return  # explicit, visible skip
+        return created_keys
 
     todos = (insights or {}).get("todos") or []
     if not todos:
         print("ℹ️ Jira sync: no todos in insights; nothing to sync.")
-        return
+        return created_keys
 
     jc = JiraClient()
     now = int(time.time())
@@ -109,13 +111,13 @@ def sync_jira_for_extracted_insights(conn: sqlite3.Connection,
         ]
         description = "\n".join([ln for ln in description_lines if ln is not None])
 
-        assignee = todo.get("assignee") or None  # raw user text; not reliable for Jira Cloud
-        assignee_account_id = todo.get("assignee_account_id")  # only use if you actually populate this elsewhere
+        # For MVP we don't map Slack user -> Jira accountId yet.
+        assignee_account_id = todo.get("assignee_account_id")  # only if you populate this later
         labels = ["ai-shadow", "from-slack"]
         due_date = (todo.get("due_date") or "")[:10] or None
 
         # Idempotency
-        sig = f"{project_key}|{summary}|{description}|{assignee or ''}"
+        sig = f"{project_key}|{summary}|{description}|{assignee_account_id or ''}"
         h = sha256(sig.encode()).hexdigest()
 
         # Already created?
@@ -123,43 +125,50 @@ def sync_jira_for_extracted_insights(conn: sqlite3.Connection,
         if row:
             key = row[0]
             try:
-                jc.update_issue(key, summary=summary, description=description, assignee=assignee)
+                # 🔧 IMPORTANT: use assignee_account_id= (not assignee=)
+                jc.update_issue(
+                    key,
+                    summary=summary,
+                    description=description,
+                    assignee_account_id=assignee_account_id
+                )
                 print(f"🔁 Jira sync: updated existing issue {key}")
             except Exception as e:
                 print(f"⚠️ Jira sync: update failed for {key}: {e}")
             _upsert_jira_issue(conn, now, key, issue_id="", project_key=project_key,
                                summary=summary, description=description,
-                               status=None, assignee=assignee,
+                               status=None, assignee=None,
                                priority=None, labels=",".join(labels), due_date=due_date)
             _link_if_possible(conn, now, todo, slack_ctx, key)
             continue
 
-            # Create new issue in Jira
+        # Create new issue
         try:
-                created = jc.create_issue(
-                    project_key=project_key,
-                    summary=summary,
-                    description=description,
-                    issue_type=issue_type,
-                    assignee_account_id=assignee_account_id,  # None is fine
-                    labels=labels,
-                    due_date=due_date
-                )
-                key = created["key"];
-                issue_id = created.get("id", "")
-                print(f"🆕 Jira sync: created issue {key}")
-                created_keys.append(key)
+            created = jc.create_issue(
+                project_key=project_key,
+                summary=summary,
+                description=description,
+                issue_type=issue_type,
+                assignee_account_id=assignee_account_id,   # None is fine
+                labels=labels,
+                due_date=due_date
+            )
+            key = created["key"]; issue_id = created.get("id", "")
+            print(f"🆕 Jira sync: created issue {key}")
+            created_keys.append(key)
         except Exception as e:
-                print(f"❌ Jira sync: create failed: {e}")
-                continue
+            print(f"❌ Jira sync: create failed: {e}")
+            continue
 
         # Mirror + dedup + link
         conn.execute("INSERT INTO jira_dedup (created_at, hash, jira_key) VALUES (?, ?, ?)", (now, h, key))
         _upsert_jira_issue(conn, now, key, issue_id, project_key, summary, description,
-                           status="To Do", assignee=assignee, priority=None,
+                           status="To Do", assignee=None, priority=None,
                            labels=",".join(labels), due_date=due_date)
         _link_if_possible(conn, now, todo, slack_ctx, key)
-        return created_keys
+
+    return created_keys
+
 
 
 def _link_if_possible(conn: sqlite3.Connection, now_ts: int, todo: Dict[str, Any],

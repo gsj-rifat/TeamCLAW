@@ -2280,6 +2280,7 @@ def slack_events():
                     print(
                         f"🔧 Jira sync: todos_to_sync={len(todo_items)} project_key={(os.getenv('JIRA_PROJECT_KEY') or '').strip()!r}")
 
+                    created_keys = []
                     if todo_items:
                         try:
                             ts = float(event.get("ts", time.time()))
@@ -2294,27 +2295,24 @@ def slack_events():
                         }
                         with db_write() as wconn:
                             _ensure_jira_tables(wconn)
-                            sync_jira_for_extracted_insights(wconn, {"todos": todo_items}, slack_ctx)
+                            created_keys = sync_jira_for_extracted_insights(wconn, {"todos": todo_items}, slack_ctx)
                         print("✅ Jira sync for insights complete")
                     else:
                         print("ℹ️ No todos to sync to Jira")
+
+                    # NEW: reply in Slack thread with created keys
+                    if created_keys:
+                        issue_links = ", ".join(
+                            f"<{os.getenv('JIRA_BASE_URL').rstrip('/')}/browse/{k}|{k}>" for k in created_keys)
+                        msg = f"Created Jira issue(s): {issue_links}"
+                        ok = _post_to_slack_thread(channel_id, event.get('ts', ''), msg)
+                        if ok:
+                            print(f"💬 Posted Slack thread reply with keys: {created_keys}")
+                        else:
+                            print("⚠️ Failed to post Slack thread reply (see previous log).")
                 except Exception as je:
                     print(f"⚠️ Jira sync failed: {je}")
                 # ---- end Jira sync ----
-
-                with db_write() as wconn:
-                    _ensure_jira_tables(wconn)
-                    created_keys = sync_jira_for_extracted_insights(wconn, {"todos": todo_items}, slack_ctx)
-                print("✅ Jira sync for insights complete")
-
-                # NEW: reply in Slack thread with created keys
-                if created_keys:
-                    issue_links = ", ".join(
-                        f"<{os.getenv('JIRA_BASE_URL').rstrip('/')}/browse/{k}|{k}>" for k in created_keys)
-                    msg = f"Created Jira issue(s): {issue_links}"
-                    _post_to_slack_thread(channel_id, event.get('ts', ''), msg)
-
-                formatted_message = format_insights_for_slack(insights, channel_id)
 
                 # Post to target channel
                 if TARGET_CHANNEL_ID:
