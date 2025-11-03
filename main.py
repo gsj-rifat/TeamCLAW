@@ -2314,6 +2314,8 @@ def slack_events():
                     print(f"⚠️ Jira sync failed: {je}")
                 # ---- end Jira sync ----
 
+                formatted_message = format_insights_for_slack(insights, channel_id)
+
                 # Post to target channel
                 if TARGET_CHANNEL_ID:
                     success = post_to_slack_channel(TARGET_CHANNEL_ID, formatted_message)
