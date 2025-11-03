@@ -81,6 +81,7 @@ def sync_jira_for_extracted_insights(conn: sqlite3.Connection,
     raw_key = os.getenv("JIRA_PROJECT_KEY", "")
     project_key = (raw_key or "").strip()
     issue_type = (os.getenv("JIRA_DEFAULT_ISSUE_TYPE", "Task") or "Task").strip()
+    created_keys = []
 
     if not project_key:
         print("⚠️ Jira sync: JIRA_PROJECT_KEY is missing/empty. Skipping Jira create/update and mirror upsert.")
@@ -147,6 +148,7 @@ def sync_jira_for_extracted_insights(conn: sqlite3.Connection,
                 key = created["key"];
                 issue_id = created.get("id", "")
                 print(f"🆕 Jira sync: created issue {key}")
+                created_keys.append(key)
         except Exception as e:
                 print(f"❌ Jira sync: create failed: {e}")
                 continue
@@ -157,6 +159,7 @@ def sync_jira_for_extracted_insights(conn: sqlite3.Connection,
                            status="To Do", assignee=assignee, priority=None,
                            labels=",".join(labels), due_date=due_date)
         _link_if_possible(conn, now, todo, slack_ctx, key)
+        return created_keys
 
 
 def _link_if_possible(conn: sqlite3.Connection, now_ts: int, todo: Dict[str, Any],

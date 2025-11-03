@@ -16,6 +16,7 @@ import sqlite3, threading, time
 from contextlib import contextmanager
 from jira_client import JiraClient
 from jira_sync import sync_jira_for_extracted_insights
+from slack_sdk import WebClient
 
 
 
@@ -1668,6 +1669,20 @@ def summaries_create():
 # Jira Integration
 # ---------------------------
 
+def _post_to_slack_thread(channel_id: str, thread_ts: str, text: str) -> bool:
+    token = os.getenv("SLACK_BOT_TOKEN") or os.getenv("SLACK_API_TOKEN")
+    if not token:
+        print("⚠️ No SLACK_BOT_TOKEN configured; cannot reply in thread.")
+        return False
+    try:
+        client = WebClient(token=token)
+        client.chat_postMessage(channel=channel_id, text=text, thread_ts=thread_ts or None)
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to post Slack thread reply: {e}")
+        return False
+
+
 def _ensure_jira_tables(conn: sqlite3.Connection | None = None):
     local = None
     try:
@@ -2286,6 +2301,18 @@ def slack_events():
                 except Exception as je:
                     print(f"⚠️ Jira sync failed: {je}")
                 # ---- end Jira sync ----
+
+                with db_write() as wconn:
+                    _ensure_jira_tables(wconn)
+                    created_keys = sync_jira_for_extracted_insights(wconn, {"todos": todo_items}, slack_ctx)
+                print("✅ Jira sync for insights complete")
+
+                # NEW: reply in Slack thread with created keys
+                if created_keys:
+                    issue_links = ", ".join(
+                        f"<{os.getenv('JIRA_BASE_URL').rstrip('/')}/browse/{k}|{k}>" for k in created_keys)
+                    msg = f"Created Jira issue(s): {issue_links}"
+                    _post_to_slack_thread(channel_id, event.get('ts', ''), msg)
 
                 formatted_message = format_insights_for_slack(insights, channel_id)
 
