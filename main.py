@@ -15,6 +15,8 @@ from flask import Flask, request, jsonify, Blueprint, send_from_directory, redir
 import sqlite3, threading, time
 from contextlib import contextmanager
 from jira_client import JiraClient
+from jira_sync import sync_jira_for_extracted_insights
+
 
 
 
@@ -2243,6 +2245,49 @@ def slack_events():
                     message_text=message_text,
                     insights=insights,
                 )
+
+                # ---- Jira sync for TODOS (normalize & sync) ----
+                try:
+                    todos_raw = insights.get("todos") or []
+                    # Normalize todos to dicts with "text"
+                    todo_items = []
+                    for t in todos_raw:
+                        if isinstance(t, dict):
+                            if "text" not in t:
+                                # if LLM produced {"title": "..."} or similar
+                                txt = t.get("title") or t.get("task") or ""
+                                t = {**t, "text": str(txt)}
+                            else:
+                                t["text"] = str(t["text"])
+                            todo_items.append(t)
+                        else:
+                            # plain string -> wrap
+                            todo_items.append({"text": str(t)})
+
+                    if todo_items:
+                        # Build minimal Slack context for traceability
+                        try:
+                            ts = float(event.get("ts", time.time()))
+                        except Exception:
+                            ts = time.time()
+                        slack_ctx = {
+                            "channel_id": channel_id,
+                            "message_ts": event.get("ts", ""),
+                            "permalink": "",  # optional: fill if you fetch Slack permalinks
+                            "author": user_id,
+                            "ts_human": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                        # Use the same DB file via your existing write context
+                        with db_write() as wconn:
+                            _ensure_jira_tables(wconn)  # safe no-op if already present
+                            sync_jira_for_extracted_insights(wconn, {"todos": todo_items}, slack_ctx)
+                        print("✅ Jira sync for insights complete")
+                    else:
+                        print("ℹ️ No todos to sync to Jira")
+                except Exception as je:
+                    print(f"⚠️ Jira sync failed: {je}")
+                # ---- end Jira sync ----
+
                 formatted_message = format_insights_for_slack(insights, channel_id)
 
                 # Post to target channel
