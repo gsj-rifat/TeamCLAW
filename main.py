@@ -2254,18 +2254,18 @@ def slack_events():
                     for t in todos_raw:
                         if isinstance(t, dict):
                             if "text" not in t:
-                                # if LLM produced {"title": "..."} or similar
                                 txt = t.get("title") or t.get("task") or ""
                                 t = {**t, "text": str(txt)}
                             else:
                                 t["text"] = str(t["text"])
                             todo_items.append(t)
                         else:
-                            # plain string -> wrap
                             todo_items.append({"text": str(t)})
 
+                    print(
+                        f"🔧 Jira sync: todos_to_sync={len(todo_items)} project_key={(os.getenv('JIRA_PROJECT_KEY') or '').strip()!r}")
+
                     if todo_items:
-                        # Build minimal Slack context for traceability
                         try:
                             ts = float(event.get("ts", time.time()))
                         except Exception:
@@ -2273,13 +2273,12 @@ def slack_events():
                         slack_ctx = {
                             "channel_id": channel_id,
                             "message_ts": event.get("ts", ""),
-                            "permalink": "",  # optional: fill if you fetch Slack permalinks
+                            "permalink": "",
                             "author": user_id,
                             "ts_human": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S"),
                         }
-                        # Use the same DB file via your existing write context
                         with db_write() as wconn:
-                            _ensure_jira_tables(wconn)  # safe no-op if already present
+                            _ensure_jira_tables(wconn)
                             sync_jira_for_extracted_insights(wconn, {"todos": todo_items}, slack_ctx)
                         print("✅ Jira sync for insights complete")
                     else:
