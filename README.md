@@ -47,6 +47,11 @@ A Slack-integrated, AI-powered assistant that automatically extracts, structures
   - SOP generation from recent channel context and user instructions.
   - REST and Slack command pathways.
 
+- Jira Integration
+  - Automatically creates Jira issues from captured "todos".
+  - Syncs updates if the same task is captured again (deduplication).
+  - Posts a thread reply in Slack with links to created Jira issues.
+
 - Dashboard (no-build, static)
   - Overview tiles (reports, SOPs, summaries) and recent activities.
   - Global search across decisions/todos/facts with simple filters.
@@ -78,6 +83,8 @@ A Slack-integrated, AI-powered assistant that automatically extracts, structures
   - slack_bot.py: Example Slack bot class with message processing hooks.
   - server.js (+ package.json): Optional sample Express server for webhook testing.
   - requirements.txt, runtime.txt: Python dependencies and runtime version.
+  - jira_client.py: Minimal async client for Jira Cloud REST API (v3).
+  - jira_sync.py: Logic to deduplicate and sync extracted todos to Jira.
 
 ## Repository structure
 
@@ -88,6 +95,8 @@ A Slack-integrated, AI-powered assistant that automatically extracts, structures
 - report_commands.py
 - sop_readiness.py
 - sop_generator.py
+- jira_client.py
+- jira_sync.py
 - slack_bot.py
 - index.html
 - app.js
@@ -128,6 +137,13 @@ Set the following (names reflect functionality implemented in the modules):
 
 - Storage
   - INSIGHTS_DB_PATH (optional; defaults to a local SQLite file, e.g., insights.db)
+
+- Jira (Optional)
+  - JIRA_BASE_URL (e.g., https://yourdomain.atlassian.net)
+  - JIRA_EMAIL
+  - JIRA_API_TOKEN
+  - JIRA_PROJECT_KEY (e.g., PROJ)
+  - JIRA_DEFAULT_ISSUE_TYPE (default: "Task")
 
 - Dashboard (role-aware UI)
   - If your code is configured for token roles, set environment tokens as applicable (viewer/user/admin).
