@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 from typing import Optional
 
 class Settings(BaseSettings):
@@ -15,14 +16,17 @@ class Settings(BaseSettings):
     jira_api_token: Optional[str] = None
     jira_project_key: Optional[str] = None
 
-    # Database (Postgres)
+    # Database (Postgres) components
     postgres_user: Optional[str] = "postgres"
     postgres_password: Optional[str] = "postgres"
     postgres_db: Optional[str] = "webhook_server"
     postgres_host: Optional[str] = "localhost"
     postgres_port: Optional[str] = "5432"
 
-    # Legacy (To be removed after full migration, or kept for fallback)
+    # Direct URL Override (e.g. Supabase) - Aliased to standard DATABASE_URL env var
+    external_database_url: Optional[str] = Field(None, alias="DATABASE_URL")
+
+    # Legacy
     insights_db_path: str = "insights.db"
     
     # Noise Filter settings
@@ -32,8 +36,20 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
+        # Prioritize external/direct URL if provided (e.g. from Supabase)
+        if self.external_database_url:
+            # Fix for SQLAlchemy AsyncPG compatibility if protocol is just 'postgres://'
+            if self.external_database_url.startswith("postgres://"):
+                return self.external_database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+            if self.external_database_url.startswith("postgresql://") and "+asyncpg" not in self.external_database_url:
+                 return self.external_database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            return self.external_database_url
+
+        # Fallback to constructed URL
         if self.postgres_user and self.postgres_host:
              return f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        
+        # Fallback to SQLite
         return "sqlite+aiosqlite:///insights.db"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

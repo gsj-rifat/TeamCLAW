@@ -3,12 +3,18 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from src.infrastructure.container import container
 from src.infrastructure.config import settings
+from src.infrastructure.db_schema import init_db
 from src.api.routes import slack, reports, sop
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Initialize resources
     await container.init_resources()
+    
+    # Explicitly ensure tables exist (User Request)
+    # accessing engine from the adapter
+    await init_db(container.db.engine)
+    
     yield
     # Shutdown: Cleanup if needed (nothing for now)
 

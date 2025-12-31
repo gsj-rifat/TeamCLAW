@@ -2,6 +2,7 @@ from datetime import datetime
 from uuid import UUID, uuid4
 from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Integer, Text, Table
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
+from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
@@ -55,3 +56,11 @@ class InsightModel(Base):
     message_text: Mapped[str] = mapped_column(Text)
 
     tenant = relationship("TenantModel", back_populates="insights")
+
+async def init_db(engine: AsyncEngine):
+    """
+    Initializes the database by creating all tables defined in this schema.
+    This is safe to run on startup (idempotent).
+    """
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
