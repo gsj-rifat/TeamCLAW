@@ -62,50 +62,34 @@ A Slack-integrated, AI-powered assistant that automatically extracts, structures
   - Runs with a single worker; SQLite initialized automatically.
   - Optional sample Node/Express webhook server for testing.
 
-## Architecture overview
+## Architecture overview (GenAI-Native)
+- **Core (`src/core/`)**: Pure business logic and interfaces. Zero external dependencies.
+  - `interfaces/`: Abstract Base Classes (ABCs) for LLM, DB, Slack, Jira.
+  - `models/`: Type-safe Pydantic models (`InsightRecord`, `Sop`).
+  - `logic/`: Reusable business logic (`InsightExtractor`, `ReportBuilder`, `SopGenerator`, `MessageWorkflow`).
 
-- Data flow
-  1. Slack sends events to the Flask app (messages, commands).
-  2. Messages are filtered and passed to the LLM wrapper for extraction.
-  3. Extracted insights are persisted in SQLite via a reporting service.
-  4. Reports/APIs serve the dashboard and Slack summaries; CSV export available.
-  5. SOP modules provide readiness checks and generation endpoints.
+- **Adapters (`src/adapters/`)**: Concrete implementations of external tools.
+  - `GroqAdapter`: Async LLM calls.
+  - `SqliteAdapter`: Async DB operations using `aiosqlite`.
+  - `SlackAdapter` / `JiraAdapter`: Async messaging and ticketing.
 
-- Core modules
-  - main.py: Flask application, routes, Slack event handling, dashboard/API endpoints.
-  - groq_llm.py: Thin wrapper for Groq text/chat generation and model management.
-  - processing_chain.py: Message processing utilities for coaching-style interactions.
-  - reporting.py: SQLite schema, CRUD, aggregations, and report generation APIs.
-  - report_commands.py: Slash command parsing and report generation/posting.
-  - sop_readiness.py: Completeness analysis of conversations for SOP drafting.
-  - sop_generator.py: SOP generation from recent context and instructions.
-  - Dashboard static: index.html, app.js, app.css with role-based UI behavior.
-  - slack_bot.py: Example Slack bot class with message processing hooks.
-  - server.js (+ package.json): Optional sample Express server for webhook testing.
-  - requirements.txt, runtime.txt: Python dependencies and runtime version.
-  - jira_client.py: Minimal async client for Jira Cloud REST API (v3).
-  - jira_sync.py: Logic to deduplicate and sync extracted todos to Jira.
+- **Infrastructure (`src/infrastructure/`)**: Wiring and Configuration.
+  - `config.py`: Pydantic Settings for environment variables.
+  - `container.py`: Dependency Injection container.
+  - `prompts.py`: Centralized system prompts.
+
+- **Entry Point (`main.py`)**: A thin Flask app that delegates all logic to the `Container`.
 
 ## Repository structure
 
-- main.py
-- groq_llm.py
-- processing_chain.py
-- reporting.py
-- report_commands.py
-- sop_readiness.py
-- sop_generator.py
-- jira_client.py
-- jira_sync.py
-- slack_bot.py
-- index.html
-- app.js
-- app.css
+- src/
+  - core/
+  - adapters/
+  - infrastructure/
+- main.py (Entry point)
 - requirements.txt
 - runtime.txt
-- server.js
-- package.json
-- package-lock.json
+- dashboard_static/ (UI assets)
 
 ## Getting started
 
@@ -152,14 +136,16 @@ Set the following (names reflect functionality implemented in the modules):
 Note: Initialize and reference a single consistent INSIGHTS_DB_PATH everywhere (ingestion and APIs).
 
 ### Run locally
-
 ```bash
-# Run the Flask app (via gunicorn in production style)
-gunicorn main:app --bind 0.0.0.0:5000 --workers 1 --timeout 120
-```
+# Install dependencies
+pip install -r requirements.txt
 
+# Run the Flask app
+flask --app main run
+# OR
+python main.py
+```
 - Visit the dashboard at http://localhost:5000/dashboard
-- For Slack events testing from your machine, use a tunnel and configure your Slack app’s Request URL accordingly.
 
 ## Slack app setup
 
