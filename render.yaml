@@ -3,15 +3,15 @@ services:
     name: ai-shadow
     env: python
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 main:application"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
-      - key: RENDER
-        value: true
-      - key: DASHBOARD_TOKENS
-        value: '{"viewer-token":"viewer","user-token":"user","admin-token":"admin"}'
-
+      
+      # Database Connection (Supabase)
+      - key: DATABASE_URL
+        sync: false
+        
       # Secrets (set in Render dashboard)
       - key: GROQ_API_KEY
         sync: false
@@ -19,24 +19,20 @@ services:
         sync: false
       - key: SLACK_SIGNING_SECRET
         sync: false
+
+      # Jira Config
+      - key: JIRA_BASE_URL
+        sync: false
+      - key: JIRA_EMAIL
+        sync: false
+      - key: JIRA_API_TOKEN
+        sync: false
+      - key: JIRA_PROJECT_KEY
+        sync: false
+
+      # Optional Config
       - key: TARGET_CHANNEL_ID
         sync: false
-      - key: DASHBOARD_VIEWER_TOKENS
-        value: "viewer-abc123,viewer-xyz789"
-      - key: DASHBOARD_USER_TOKENS
-        value: "user-abc123,user-xyz789"
-      - key: DASHBOARD_ADMIN_TOKENS
-        value: "admin-secret-1,admin-secret-2"
-
-      # Reporting config (DB on persistent disk)
-      - key: INSIGHTS_DB_PATH
-        value: insights.db
-      - key: REPORT_POST_CHANNEL_ID
-        value: ""             # fallback to TARGET_CHANNEL_ID if empty
-      - key: REPORT_INCLUDE_FACTS
-        value: "true"
-      - key: REPORT_MAX_ITEMS
-        value: "50"
 
     disk:
       name: insights-disk
