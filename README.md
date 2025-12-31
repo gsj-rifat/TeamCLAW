@@ -12,6 +12,10 @@ A Slack-integrated, AI-powered assistant that automatically extracts, structures
 - Why it was built
   - To create a low-friction, always-on “shadow coach” that listens to team chats and converts them into structured, queryable knowledge—without changing how teams already work.
 
+- **Multi-Tenant & Scalable**
+  - Built on **FastAPI** and **PostgreSQL** to handle multiple organizations (Tenants).
+  - Data is strictly isolated by Tenant ID.
+
 - The problem it solves
   - Automates extraction of decisions, todos, and facts from Slack messages.
   - Centralizes captured knowledge in a simple, queryable store.
@@ -119,8 +123,12 @@ Set the following (names reflect functionality implemented in the modules):
   - SLACK_SIGNING_SECRET
   - Optional: a target channel for posting reports/summaries (if your code supports it)
 
-- Storage
-  - INSIGHTS_DB_PATH (optional; defaults to a local SQLite file, e.g., insights.db)
+- Storage (PostgreSQL)
+  - POSTGRES_USER
+  - POSTGRES_PASSWORD
+  - POSTGRES_DB
+  - POSTGRES_HOST
+  - POSTGRES_PORT
 
 - Jira (Optional)
   - JIRA_BASE_URL (e.g., https://yourdomain.atlassian.net)
@@ -140,12 +148,14 @@ Note: Initialize and reference a single consistent INSIGHTS_DB_PATH everywhere (
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the Flask app
-flask --app main run
-# OR
-python main.py
+# Run the FastAPI app (dev mode)
+uvicorn main:app --reload
+
+# Production
+uvicorn main:app --host 0.0.0.0 --port 5000 --workers 4
 ```
-- Visit the dashboard at http://localhost:5000/dashboard
+- Swagger UI (API Docs): http://localhost:5000/docs
+- Dashboard: http://localhost:5000/dashboard
 
 ## Slack app setup
 

@@ -1,6 +1,6 @@
 from src.infrastructure.config import settings
 from src.adapters.groq_adapter import GroqAdapter
-from src.adapters.sqlite_adapter import SqliteAdapter
+from src.adapters.postgres_adapter import PostgresAdapter
 from src.adapters.slack_adapter import SlackAdapter
 from src.adapters.jira_adapter import JiraAdapter
 from src.core.logic.extraction import InsightExtractor
@@ -14,7 +14,10 @@ class Container:
         self.settings = settings
         
         # Adapters
-        self.db = SqliteAdapter(settings.insights_db_path)
+        # Using PostgresAdapter now. 
+        # Note: If database_url is missing/invalid, this might raise an error on init_db/connection.
+        self.db = PostgresAdapter(settings.database_url)
+        
         self.llm = GroqAdapter(settings.groq_api_key, settings.groq_model)
         self.slack = SlackAdapter(settings.slack_bot_token)
         self.jira = JiraAdapter(
