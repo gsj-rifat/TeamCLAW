@@ -42,7 +42,7 @@ class PostgresAdapter(DatabasePort):
         async with self.async_session() as session:
             db_insight = InsightModel(
                 tenant_id=tenant_id,
-                created_at=datetime.fromtimestamp(insight.created_at),
+                created_at=insight.created_at,
                 date=insight.date,
                 channel_id=insight.channel_id,
                 user_id=insight.user_id,
