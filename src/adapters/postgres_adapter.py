@@ -11,13 +11,25 @@ from src.infrastructure.db_schema import Base, InsightModel, TenantModel
 
 class PostgresAdapter(DatabasePort):
     def __init__(self, database_url: str):
-        self.engine = create_async_engine(database_url, echo=False)
+        self.engine = create_async_engine(
+            database_url,
+            echo=True,
+            pool_pre_ping=True,
+            # This magic line fixes the errors with Supabase Port 6543 (Transaction Mode):
+            connect_args={"prepare_threshold": None}
+        )
         self.async_session = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def init_db(self):
-        async with self.engine.begin() as conn:
-            # In production, use Alembic. For MVP, create tables here.
-            await conn.run_sync(Base.metadata.create_all)
+        try:
+            print(f"Connecting to database with engine: {self.engine.url}")
+            async with self.engine.begin() as conn:
+                # In production, use Alembic. For MVP, create tables here.
+                await conn.run_sync(Base.metadata.create_all)
+        except Exception as e:
+            print(f"CRITICAL: Database connection failed. URL: {self.engine.url.render_as_string(hide_password=True)}")
+            print(f"Error details: {e}")
+            raise e
 
     # --- Insight Operations with Multi-Tenancy ---
 
