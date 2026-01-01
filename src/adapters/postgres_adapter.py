@@ -45,7 +45,7 @@ class PostgresAdapter(DatabasePort):
                 created_at=insight.created_at,
                 date=insight.date,
                 channel_id=insight.channel_id,
-                user_id=insight.user_id,
+                user_id=insight.slack_user_id, # Map Pydantic slack_user_id -> DB user_id
                 decisions=insight.decisions,
                 todos=insight.todos,
                 facts=insight.facts,
@@ -80,13 +80,15 @@ class PostgresAdapter(DatabasePort):
             result = await session.execute(query)
             rows = result.scalars().all()
             
+            # Map DB user_id -> Pydantic slack_user_id
             return [
                 InsightRecord(
                     id=row.id,
-                    created_at=int(row.created_at.timestamp()),
+                    tenant_id=row.tenant_id,
+                    created_at=row.created_at,
                     date=row.date,
                     channel_id=row.channel_id,
-                    user_id=row.user_id,
+                    slack_user_id=row.user_id, # Correct mapping
                     decisions=row.decisions,
                     todos=row.todos,
                     facts=row.facts,
