@@ -40,7 +40,7 @@ class MessageWorkflow:
             facts=[f.text for f in insights.facts if f.text],
             message_text=text
         )
-        await self.db.save_insight(record)
+        await self.db.save_insight(record, tenant_id=record.tenant_id)
         
         # 4. Jira Sync (if enabled and todos exist)
         if insights.todos and settings.jira_project_key:
