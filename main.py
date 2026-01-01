@@ -25,6 +25,14 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+from fastapi.responses import RedirectResponse
+
+# ... (imports)
+
+@app.get("/")
+async def root():
+    return RedirectResponse(url="/dashboard")
+
 # Health Check
 @app.get("/health")
 async def health():
