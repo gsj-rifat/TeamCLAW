@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     jira_email: Optional[str] = None
     jira_api_token: Optional[str] = None
     jira_project_key: Optional[str] = None
+    
+    # Defaults
+    default_tenant_id: str = "00000000-0000-0000-0000-000000000000" # Null UUID for singular/MVP deployment
 
     # Database (Postgres) components
     postgres_user: Optional[str] = "postgres"

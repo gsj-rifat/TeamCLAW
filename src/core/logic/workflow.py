@@ -30,10 +30,11 @@ class MessageWorkflow:
         
         # 3. Save to DB
         record = InsightRecord(
+            tenant_id=settings.default_tenant_id,  # TODO: real context
             created_at=int(datetime.now().timestamp()),
             date=datetime.now().strftime("%Y-%m-%d"),
             channel_id=channel_id,
-            user_id=user_id,
+            slack_user_id=user_id,  # Correct mapping: user_id arg is Slack ID
             decisions=[d.text for d in insights.decisions if d.text],
             todos=[t.text for t in insights.todos if t.text],
             facts=[f.text for f in insights.facts if f.text],
