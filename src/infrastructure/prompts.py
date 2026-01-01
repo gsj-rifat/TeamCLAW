@@ -17,12 +17,12 @@ Noise (not meaningful) examples:
 - Duplicates or trivial chatter
 
 Return ONLY a JSON object in this exact schema:
-{
+{{
   "is_meaningful": true|false,
   "category": "decision|todo|fact|update|question|process|noise",
   "confidence": 0.0 to 1.0,
   "reason": "short explanation"
-}
+}}
 
 Message:
 \"\"\"{text}\"\"\"
@@ -34,11 +34,11 @@ Extract insights from this message and respond with ONLY a JSON object:
 Message: "{text}"
 
 Required JSON format (no other text):
-{
-    "decisions": [{"text": "decision made"}], 
-    "todos": [{"text": "action item"}], 
-    "facts": [{"text": "key fact"}]
-}
+{{
+    "decisions": [{{"text": "decision made"}}], 
+    "todos": [{{"text": "action item"}}], 
+    "facts": [{{"text": "key fact"}}]
+}}
 """
 
 REPORT_SUMMARY_PROMPT = """
