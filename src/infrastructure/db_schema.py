@@ -57,10 +57,38 @@ class InsightModel(Base):
 
     tenant = relationship("TenantModel", back_populates="insights")
 
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+
+# Default tenant UUID for MVP/single-tenant deployment
+DEFAULT_TENANT_ID = UUID("00000000-0000-0000-0000-000000000000")
+
 async def init_db(engine: AsyncEngine):
     """
     Initializes the database by creating all tables defined in this schema.
+    Also seeds a default tenant if it doesn't exist.
     This is safe to run on startup (idempotent).
     """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    
+    # Seed default tenant if not exists
+    async_session = async_sessionmaker(engine, expire_on_commit=False)
+    async with async_session() as session:
+        result = await session.execute(
+            select(TenantModel).where(TenantModel.id == DEFAULT_TENANT_ID)
+        )
+        existing = result.scalar_one_or_none()
+        if not existing:
+            default_tenant = TenantModel(
+                id=DEFAULT_TENANT_ID,
+                name="Default Tenant",
+                domain="default.local"
+            )
+            session.add(default_tenant)
+            await session.commit()
+            print("INFO: Seeded default tenant")
+        else:
+            print("INFO: Default tenant already exists")

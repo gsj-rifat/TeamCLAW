@@ -4,7 +4,7 @@ from typing import Optional
 
 class Settings(BaseSettings):
     groq_api_key: str
-    groq_model: str = "llama3-70b-8192"
+    groq_model: str = "llama-3.3-70b-versatile"  # Updated from deprecated llama3-70b-8192
 
     slack_bot_token: Optional[str] = None
     slack_signing_secret: Optional[str] = None
