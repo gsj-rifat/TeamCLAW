@@ -39,6 +39,7 @@ class ExtractedInsights(BaseModel):
 # --- Legacy/Storage Record (Optional, kept for backward compat if needed, but updated) ---
 class InsightRecord(AuditModel):
     id: Optional[int] = None # Auto-incrementing int for SQLite compatibility
+    tenant_id: UUID # Added to support multi-tenancy context
     # Timestamps inherited from AuditModel (created_at, updated_at)
     date: str
     channel_id: Optional[str]
