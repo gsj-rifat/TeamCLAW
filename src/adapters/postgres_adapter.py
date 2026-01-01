@@ -13,10 +13,11 @@ class PostgresAdapter(DatabasePort):
     def __init__(self, database_url: str):
         self.engine = create_async_engine(
             database_url,
-            echo=True,
+            echo=True,     # Useful for debugging, set to False in production
             pool_pre_ping=True,
-            # This magic line fixes the errors with Supabase Port 6543 (Transaction Mode):
-            connect_args={"prepare_threshold": None}
+            connect_args={
+                "statement_cache_size": 0  # <--- This disables prepared statements for Supabase
+            }
         )
         self.async_session = async_sessionmaker(self.engine, expire_on_commit=False)
 
