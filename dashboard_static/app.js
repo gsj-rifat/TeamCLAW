@@ -1,6 +1,6 @@
 (function () {
   // ===================== Config =====================
-  const API_BASE = "/dashboard/api"; // adjust if your backend path differs
+  const API_BASE = ""; // Routes are at /reports, /sop, etc.
 
   // ===================== Utilities =====================
   const el = (id) => document.getElementById(id);

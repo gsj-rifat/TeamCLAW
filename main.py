@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from src.infrastructure.container import container
 from src.infrastructure.config import settings
 from src.infrastructure.db_schema import init_db
-from src.api.routes import slack, reports, sop
+from src.api.routes import slack, reports, sop, dashboard_api
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -49,6 +49,7 @@ async def health():
 app.include_router(slack.router, prefix="/slack", tags=["Slack"])
 app.include_router(reports.router, prefix="/reports", tags=["Reports"])
 app.include_router(sop.router, prefix="/sop", tags=["SOP"])
+app.include_router(dashboard_api.router, tags=["Dashboard API"])  # Dashboard API at root level
 
 # Mount Static Dashboard
 app.mount("/dashboard", StaticFiles(directory="dashboard_static", html=True), name="dashboard")
