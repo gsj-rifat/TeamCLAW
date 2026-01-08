@@ -64,7 +64,7 @@ class MessageWorkflow:
                 await self.slack.post_thread_reply(channel_id, ts, f"Created Jira issues: {links}")
         
         # 6. Post Summary to Target Channel (if configured)
-        if settings.report_post_channel_id and (insights.decisions or insights.todos or insights.facts):
+        if settings.target_channel_id and (insights.decisions or insights.todos or insights.facts):
              # Simple format
             lines = ["🤖 *AI Insights Extracted:*"]
             if insights.decisions:
@@ -74,4 +74,4 @@ class MessageWorkflow:
             if insights.facts:
                 lines.append(f"💡 *Facts*: " + ", ".join([f.text for f in insights.facts if f.text]))
             
-            await self.slack.post_message(settings.report_post_channel_id, "\n".join(lines))
+            await self.slack.post_message(settings.target_channel_id, "\n".join(lines))
