@@ -4,6 +4,7 @@ from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from src.infrastructure.config import settings
 from src.infrastructure.container import container
+from src.core.logic.identity import get_or_create_tenant_by_slack_id
 
 router = APIRouter()
 
@@ -51,6 +52,20 @@ async def slack_events(request: Request, background_tasks: BackgroundTasks):
     if "challenge" in data:
         print("DEBUG: Responding to URL challenge")
         return JSONResponse(content={"challenge": data["challenge"]})
+    
+    # 2. Extract Slack Team ID and resolve tenant
+    slack_team_id = data.get("team_id", "")
+    if not slack_team_id:
+        print("DEBUG: No team_id in payload, using default tenant")
+        tenant_id = None
+    else:
+        # Get or create tenant for this Slack workspace
+        tenant_id = await get_or_create_tenant_by_slack_id(
+            container.db.async_session,
+            slack_team_id,
+            team_name=f"Slack Workspace {slack_team_id}"
+        )
+        print(f"DEBUG: Resolved tenant_id={tenant_id} for team_id={slack_team_id}")
         
     if "event" in data:
         event = data["event"]
@@ -69,9 +84,10 @@ async def slack_events(request: Request, background_tasks: BackgroundTasks):
             # Use BackgroundTasks for async processing to return 200 OK fast to Slack
             background_tasks.add_task(
                 container.workflow.process_message, 
-                text, channel, user, ts
+                text, channel, user, ts, tenant_id
             )
         else:
             print("DEBUG: Skipping event (type mismatch or bot message)")
             
     return JSONResponse(content={"status": "processed"})
+

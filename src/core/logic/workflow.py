@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Optional
+from uuid import UUID
 from src.core.interfaces.db import DatabasePort
 from src.core.interfaces.tickets import TicketProvider
 from src.core.interfaces.messaging import NotificationProvider
@@ -18,7 +19,10 @@ class MessageWorkflow:
         self.jira = jira
         self.slack = slack
 
-    async def process_message(self, text: str, channel_id: str, user_id: str, ts: str) -> None:
+    async def process_message(self, text: str, channel_id: str, user_id: str, ts: str, tenant_id: Optional[UUID] = None) -> None:
+        # Use provided tenant_id or fall back to default
+        effective_tenant_id = tenant_id if tenant_id else UUID(settings.default_tenant_id)
+        
         # 1. Noise Filter
         meaningful, reason = await self.extractor.is_meaningful(text)
         if not meaningful:
@@ -31,7 +35,7 @@ class MessageWorkflow:
         # 3. Save to DB
         now = datetime.utcnow()  # Naive UTC datetime for TIMESTAMP WITHOUT TIME ZONE
         record = InsightRecord(
-            tenant_id=settings.default_tenant_id,  # TODO: real context
+            tenant_id=effective_tenant_id,
             created_at=now,
             date=now.strftime("%Y-%m-%d"),
             channel_id=channel_id,
@@ -41,7 +45,7 @@ class MessageWorkflow:
             facts=[f.text for f in insights.facts if f.text],
             message_text=text
         )
-        await self.db.save_insight(record, tenant_id=record.tenant_id)
+        await self.db.save_insight(record, tenant_id=effective_tenant_id)
         
         # 4. Jira Sync (if enabled and todos exist)
         if insights.todos and settings.jira_project_key:

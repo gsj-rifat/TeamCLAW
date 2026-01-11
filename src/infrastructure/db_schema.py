@@ -14,6 +14,7 @@ class TenantModel(Base):
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String, nullable=False)
     domain: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    slack_team_id: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=True)  # Slack workspace ID
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
