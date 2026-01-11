@@ -26,3 +26,24 @@ class SlackAdapter(NotificationProvider):
         except SlackApiError as e:
             print(f"Error posting thread reply to Slack {channel_id}: {e}")
             return False
+
+    async def get_permalink(self, channel_id: str, message_ts: str) -> str:
+        """
+        Get a permanent link to a Slack message for Proof of Insight.
+        
+        Args:
+            channel_id: The channel where the message was posted
+            message_ts: The timestamp of the message
+            
+        Returns:
+            The permanent URL to the message, or empty string if failed
+        """
+        if not channel_id or not message_ts:
+            return ""
+        try:
+            result = await self.client.chat_getPermalink(channel=channel_id, message_ts=message_ts)
+            return result.get("permalink", "")
+        except SlackApiError as e:
+            print(f"Error getting permalink for {channel_id}/{message_ts}: {e}")
+            return ""
+

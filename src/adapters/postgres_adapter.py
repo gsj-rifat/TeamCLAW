@@ -46,6 +46,7 @@ class PostgresAdapter(DatabasePort):
                 date=insight.date,
                 channel_id=insight.channel_id,
                 user_id=insight.slack_user_id, # Map Pydantic slack_user_id -> DB user_id
+                source_url=insight.source_url,  # Proof of Insight - permalink to message
                 decisions=insight.decisions,
                 todos=insight.todos,
                 facts=insight.facts,

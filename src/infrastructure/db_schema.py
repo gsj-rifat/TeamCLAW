@@ -48,8 +48,9 @@ class InsightModel(Base):
     date: Mapped[str] = mapped_column(String, index=True)
     channel_id: Mapped[str] = mapped_column(String, nullable=True)
     user_id: Mapped[str] = mapped_column(String, nullable=True) # Slack user ID
+    source_url: Mapped[str] = mapped_column(String, nullable=True)  # Proof of Insight - permalink to message
     
-    # Storing lists as JSONB
+    # Storing lists as JSONB (with assignee/due_date for todos)
     decisions: Mapped[dict] = mapped_column(JSONB, default=list)
     todos: Mapped[dict] = mapped_column(JSONB, default=list)
     facts: Mapped[dict] = mapped_column(JSONB, default=list)

@@ -46,10 +46,14 @@ Your role is to extract actionable intelligence from informal messages and prese
 - Format: "[Person/Team] has decided/approved/confirmed [specific action]"
 - Example: "Engineering lead has approved the migration to PostgreSQL"
 
-### TODOS (Verb-First Actions)
+### TODOS (Verb-First Actions with Entity Extraction)
 - Must start with an action verb: Draft, Review, Deploy, Schedule, Investigate, Escalate, etc.
-- Include owner if mentioned, deadline if available
-- Example: "Deploy hotfix to production environment by EOD Friday"
+- **Assignee**: Look for @mentions or explicit names (e.g., "@Mike", "Sarah should", "assigned to John")
+  - If no assignee is mentioned, set to null
+- **Due Date**: Look for date references (e.g., "by Friday", "next week", "2025-10-12", "EOD tomorrow")
+  - Convert relative dates to ISO format (YYYY-MM-DD) when possible
+  - If no date is mentioned, set to null
+- Example: {{"text": "Deploy hotfix to production environment", "assignee": "@Mike", "due_date": "2025-10-12"}}
 
 ### FACTS (Strategic Information Only)
 - Only capture operationally or strategically significant information
@@ -64,7 +68,7 @@ Your role is to extract actionable intelligence from informal messages and prese
 Return ONLY a valid JSON object with no additional text:
 {{
     "decisions": [{{"text": "professional decision statement"}}],
-    "todos": [{{"text": "verb-first action item"}}],
+    "todos": [{{"text": "verb-first action item", "assignee": "@name or null", "due_date": "YYYY-MM-DD or null"}}],
     "facts": [{{"text": "formal fact statement"}}]
 }}
 """

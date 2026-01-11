@@ -14,13 +14,15 @@ class BaseInsight(AuditModel):
     reason: Optional[str] = None
     channel_id: Optional[str] = None
     message_ts: Optional[str] = None
+    source_url: Optional[str] = None  # Proof of Insight - link to original message
 
 # --- Domain Models ---
 class Decision(BaseInsight):
     pass
 
 class Todo(BaseInsight):
-    pass
+    assignee: Optional[str] = None  # Who is responsible (e.g., @Mike)
+    due_date: Optional[str] = None  # When it's due (e.g., 2025-10-12)
 
 class Fact(BaseInsight):
     pass
@@ -30,6 +32,8 @@ class Fact(BaseInsight):
 class ExtractedItem(BaseModel):
     text: str
     reason: Optional[str] = None
+    assignee: Optional[str] = None  # For TODOs only
+    due_date: Optional[str] = None  # For TODOs only
 
 class ExtractedInsights(BaseModel):
     decisions: List[ExtractedItem] = Field(default_factory=list)
@@ -44,6 +48,7 @@ class InsightRecord(AuditModel):
     date: str
     channel_id: Optional[str]
     slack_user_id: Optional[str]
+    source_url: Optional[str] = None  # Proof of Insight - link to original message
     
     # We might store the raw JSON blobs here, or move to normalized tables for Decisions/Todos/Facts.
     # For now, keeping the structure compatible with the SQLiteAdapter but using the new base.
@@ -51,3 +56,4 @@ class InsightRecord(AuditModel):
     todos: List[str]
     facts: List[str]
     message_text: str
+
