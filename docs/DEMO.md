@@ -30,7 +30,7 @@ Your team discusses a database choice in Slack:
     "due_date": "Friday",
     "jira_issue": "ENG-42"
   },
-  "source_url": "https://yourteam.slack.com/archives/C09AY2A2JTY/p..."
+  "source_url": "https://yourteam.slack.com/archives/C0123456789/p..."
 }
 ```
 
@@ -42,7 +42,7 @@ Stored record fields (simplified):
   "todos": ["Set up database schema"],
   "facts": [],
   "message_text": "We decided to go with PostgreSQL over MongoDB. @rifat can you set up the schema by Friday?",
-  "channel_id": "C09AY2A2JTY",
+  "channel_id": "C0123456789",
   "source_url": "https://yourteam.slack.com/archives/..."
 }
 ```
