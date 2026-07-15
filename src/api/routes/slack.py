@@ -1,93 +1,79 @@
-import hmac
-import hashlib
-from fastapi import APIRouter, Request, HTTPException, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse
+
+from src.core.logic.identity import get_or_create_tenant_by_slack_id
+from src.core.logic.slack_security import verify_slack_signature
 from src.infrastructure.config import settings
 from src.infrastructure.container import container
-from src.core.logic.identity import get_or_create_tenant_by_slack_id
+from src.infrastructure.logging_config import get_logger
 
 router = APIRouter()
+logger = get_logger(__name__)
 
-async def verify_slack_request(request: Request):
+
+async def verify_slack_request(request: Request) -> None:
     if not settings.slack_signing_secret:
-        return True
-        
+        return
+
     timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
     signature = request.headers.get("X-Slack-Signature", "")
-    
-    if not timestamp or not signature:
-        raise HTTPException(status_code=403, detail="Invalid signature headers")
-        
     body_bytes = await request.body()
     req_body = body_bytes.decode("utf-8")
-    
-    sig_basestring = f"v0:{timestamp}:{req_body}"
-    expected_signature = "v0=" + hmac.new(
-        settings.slack_signing_secret.encode(),
-        sig_basestring.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    
-    if not hmac.compare_digest(expected_signature, signature):
+
+    if not verify_slack_signature(
+        settings.slack_signing_secret, timestamp, req_body, signature
+    ):
         raise HTTPException(status_code=403, detail="Invalid signature")
+
 
 @router.post("/events")
 async def slack_events(request: Request, background_tasks: BackgroundTasks):
-    print("DEBUG: Received /slack/events request")
-    
-    # 1. Verify Request
     try:
         await verify_slack_request(request)
-        print("DEBUG: Signature verification successful")
-    except HTTPException as e:
-        print(f"DEBUG: Signature verification failed: {e.detail}")
-        raise e
-    except Exception as e:
-        print(f"DEBUG: Unexpected error in signature verification: {e}")
-        raise e
-    
+    except HTTPException:
+        logger.warning("Slack signature verification failed")
+        raise
+
     data = await request.json()
-    print(f"DEBUG: Request payload: {data}")
-    
+
     if "challenge" in data:
-        print("DEBUG: Responding to URL challenge")
         return JSONResponse(content={"challenge": data["challenge"]})
-    
-    # 2. Extract Slack Team ID and resolve tenant
+
     slack_team_id = data.get("team_id", "")
-    if not slack_team_id:
-        print("DEBUG: No team_id in payload, using default tenant")
-        tenant_id = None
-    else:
-        # Get or create tenant for this Slack workspace
+    tenant_id = None
+    if slack_team_id:
         tenant_id = await get_or_create_tenant_by_slack_id(
             container.db.async_session,
             slack_team_id,
-            team_name=f"Slack Workspace {slack_team_id}"
+            team_name=f"Slack Workspace {slack_team_id}",
         )
-        print(f"DEBUG: Resolved tenant_id={tenant_id} for team_id={slack_team_id}")
-        
+        logger.info("Resolved tenant_id=%s for team_id=%s", tenant_id, slack_team_id)
+
     if "event" in data:
         event = data["event"]
         event_type = event.get("type")
         bot_id = event.get("bot_id")
-        print(f"DEBUG: Event type: {event_type}, Bot ID: {bot_id}")
-        
-        if event_type == "message" and not bot_id:
-            text = event.get("text", "")
-            user = event.get("user", "")
-            channel = event.get("channel", "")
-            ts = event.get("ts", "")
-            
-            print(f"DEBUG: Processing valid user message: {text[:20]}... from User {user} in Channel {channel}")
-            
-            # Use BackgroundTasks for async processing to return 200 OK fast to Slack
+        subtype = event.get("subtype")
+
+        is_user_message = event_type == "message" and not bot_id and not subtype
+        is_app_mention = event_type == "app_mention" and not bot_id
+
+        if is_user_message or is_app_mention:
             background_tasks.add_task(
-                container.workflow.process_message, 
-                text, channel, user, ts, tenant_id
+                container.workflow.process_message,
+                event.get("text", ""),
+                event.get("channel", ""),
+                event.get("user", ""),
+                event.get("ts", ""),
+                tenant_id,
+                is_app_mention,
             )
         else:
-            print("DEBUG: Skipping event (type mismatch or bot message)")
-            
-    return JSONResponse(content={"status": "processed"})
+            logger.debug(
+                "Skipping Slack event type=%s bot_id=%s subtype=%s",
+                event_type,
+                bot_id,
+                subtype,
+            )
 
+    return JSONResponse(content={"status": "processed"})
