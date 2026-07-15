@@ -12,9 +12,8 @@ from src.infrastructure.config import settings
 
 router = APIRouter()
 
-# Helper to get tenant_id (MVP: use default)
 def get_tenant_id() -> UUID:
-    return UUID(settings.default_tenant_id)
+    return UUID(settings.effective_dashboard_tenant_id)
 
 @router.get("/reports")
 async def get_reports(

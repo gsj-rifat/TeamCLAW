@@ -42,7 +42,7 @@ class ExtractedInsights(BaseModel):
 
 # --- Legacy/Storage Record (Optional, kept for backward compat if needed, but updated) ---
 class InsightRecord(AuditModel):
-    id: Optional[int] = None # Auto-incrementing int for SQLite compatibility
+    id: Optional[int] = None
     tenant_id: UUID # Added to support multi-tenancy context
     # Timestamps inherited from AuditModel (created_at, updated_at)
     date: str
@@ -51,7 +51,7 @@ class InsightRecord(AuditModel):
     source_url: Optional[str] = None  # Proof of Insight - link to original message
     
     # We might store the raw JSON blobs here, or move to normalized tables for Decisions/Todos/Facts.
-    # For now, keeping the structure compatible with the SQLiteAdapter but using the new base.
+    # Stored as JSON-compatible lists on the insight record.
     decisions: List[str]
     todos: List[str]
     facts: List[str]
