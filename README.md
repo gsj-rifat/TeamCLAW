@@ -1,258 +1,432 @@
-# AI Shadow Coach MVP: Knowledge Capture from Team Chats
+# AI Shadow Coach
 
-A Slack-integrated, AI-powered assistant that automatically extracts, structures, and summarizes key decisions, action items, SOP readiness, and factual context from team conversations. Captured insights are stored in SQLite and surfaced via a lightweight web dashboard and report APIs.
+A Slack-integrated AI assistant that listens to team conversations, extracts structured knowledge (decisions, todos, facts), stores it in PostgreSQL, and surfaces it through a web dashboard and REST APIs. Optional Jira sync turns captured todos into tickets automatically.
 
-## Why this project exists
+**Version:** 2.0.0  
+**Stack:** FastAPI · Groq LLM · PostgreSQL (Supabase) · Slack · Jira (optional)
 
-- Motivation
-  - Teams make important decisions in chat, but those insights get buried.
-  - Manual note-taking and status reporting are inconsistent and time-consuming.
-  - Leaders need a repeatable way to turn daily chatter into reliable knowledge.
+---
 
-- Why it was built
-  - To create a low-friction, always-on “shadow coach” that listens to team chats and converts them into structured, queryable knowledge—without changing how teams already work.
+## What It Does
 
-- **Multi-Tenant & Scalable**
-  - Built on **FastAPI** and **PostgreSQL** to handle multiple organizations (Tenants).
-  - Data is strictly isolated by Tenant ID.
+Teams make important decisions in Slack, but that knowledge gets buried. AI Shadow Coach runs in the background as a "shadow coach":
 
-- The problem it solves
-  - Automates extraction of decisions, todos, and facts from Slack messages.
-  - Centralizes captured knowledge in a simple, queryable store.
-  - Generates daily/weekly summaries and supports SOP creation readiness.
+1. **Listens** — Receives Slack message events via webhook.
+2. **Filters** — Skips noise and low-signal messages.
+3. **Extracts** — Uses Groq (LLM) with a "Chief of Staff" persona to pull out decisions, todos (with assignee/due date), and facts.
+4. **Stores** — Persists insights in PostgreSQL with tenant isolation.
+5. **Acts** — Optionally creates Jira issues and posts summaries back to Slack.
+6. **Surfaces** — Dashboard and APIs for search, reports, and SOP workflows.
 
-- What makes it stand out
-  - Real-time extraction with a clean pipeline from Slack → LLM → storage → dashboard.
-  - Practical features focused on “knowledge you can act on” (reports, SOPs, search).
-  - Minimal infra: runs on a single process with SQLite; deploy-friendly (e.g., Render Free).
-  - Modular design: reporting, slash commands, SOP readiness/generation, and dashboard are decoupled modules.
+Every extracted insight can include a **Proof of Insight** — a permalink back to the original Slack message.
 
-## Key features
+---
 
-- Slack integration
-  - Event ingestion endpoint for messages.
-  - Optional slash commands for daily/weekly reports (with date and “to here” targeting).
-  - Posting summaries back to Slack channels.
+## Architecture
 
-- AI-powered extraction
-  - Uses a Groq-backed LLM wrapper to extract:
-    - Decisions
-    - Todos / action items
-    - Facts / noteworthy context
-  - Noise filtering and heuristics to ignore low-signal messages.
+The codebase follows a GenAI-native, layered design: pure business logic in `core/`, external integrations in `adapters/`, and wiring in `infrastructure/`.
 
-- Reporting and summaries
-  - SQLite-backed storage and aggregation.
-  - Daily/weekly report APIs and Slack-friendly formatted outputs.
-  - CSV export endpoints (for snapshots and sharing).
+```
+Slack Message
+     │
+     ▼
+POST /slack/events  ──►  Tenant resolution (Slack team_id)
+     │                          │
+     ▼                          ▼
+MessageWorkflow  ◄──  InsightExtractor (Groq LLM)
+     │
+     ├──► PostgreSQL (insights, tenants, SOPs)
+     ├──► Jira (optional — create tickets from todos)
+     └──► Slack (thread reply + target channel summary)
 
-- SOP workflows
-  - Readiness assessment: determines if a conversation is complete enough to draft an SOP.
-  - SOP generation from recent channel context and user instructions.
-  - REST and Slack command pathways.
+Dashboard / APIs  ◄──  ReportBuilder, SopGenerator
+```
 
-- Jira Integration
-  - Automatically creates Jira issues from captured "todos".
-  - Syncs updates if the same task is captured again (deduplication).
-  - Posts a thread reply in Slack with links to created Jira issues.
+### Layer map
 
-- Dashboard (no-build, static)
-  - Overview tiles (reports, SOPs, summaries) and recent activities.
-  - Global search across decisions/todos/facts with simple filters.
-  - Role-based controls in the UI (viewer/user/admin).
+| Layer | Path | Responsibility |
+|-------|------|----------------|
+| **Core** | `src/core/` | Interfaces (ABCs), Pydantic models, pure logic |
+| **Adapters** | `src/adapters/` | Groq, Postgres, Slack, Jira implementations |
+| **Infrastructure** | `src/infrastructure/` | Config, DI container, DB schema, LLM prompts |
+| **API** | `src/api/routes/` | FastAPI route handlers |
+| **Frontend** | `dashboard_static/` | Static dashboard (HTML/CSS/JS, no build step) |
+| **Entry** | `main.py` | FastAPI app, lifespan, route mounting |
 
-- Developer-friendly
-  - Simple, explicit modules for extraction, reporting, and SOP utilities.
-  - Runs with a single worker; SQLite initialized automatically.
-  - Optional sample Node/Express webhook server for testing.
+### Key modules
 
-## Architecture overview (GenAI-Native)
-- **Core (`src/core/`)**: Pure business logic and interfaces. Zero external dependencies.
-  - `interfaces/`: Abstract Base Classes (ABCs) for LLM, DB, Slack, Jira.
-  - `models/`: Type-safe Pydantic models (`InsightRecord`, `Sop`).
-  - `logic/`: Reusable business logic (`InsightExtractor`, `ReportBuilder`, `SopGenerator`, `MessageWorkflow`).
+| Module | Role |
+|--------|------|
+| `workflow.py` | End-to-end message pipeline: filter → extract → save → Jira → notify |
+| `extraction.py` | LLM-based insight extraction and noise filtering |
+| `identity.py` | Slack-first tenant auto-provisioning by `team_id` |
+| `reporting.py` | Daily/weekly report generation |
+| `sop.py` | SOP readiness checks and generation |
+| `container.py` | Dependency injection — wires all adapters and logic |
 
-- **Adapters (`src/adapters/`)**: Concrete implementations of external tools.
-  - `GroqAdapter`: Async LLM calls.
-  - `SqliteAdapter`: Async DB operations using `aiosqlite`.
-  - `SlackAdapter` / `JiraAdapter`: Async messaging and ticketing.
+---
 
-- **Infrastructure (`src/infrastructure/`)**: Wiring and Configuration.
-  - `config.py`: Pydantic Settings for environment variables.
-  - `container.py`: Dependency Injection container.
-  - `prompts.py`: Centralized system prompts.
+## Features
 
-- **Entry Point (`main.py`)**: A thin Flask app that delegates all logic to the `Container`.
+### Slack integration
+- Event ingestion at `POST /slack/events` with HMAC signature verification
+- URL verification challenge handling
+- Background processing (returns 200 immediately to Slack)
+- Optional summary posts to a configured target channel
+- Thread replies when Jira issues are created
+
+### AI extraction
+- Groq-backed LLM (`llama-3.3-70b-versatile` by default)
+- Extracts **decisions**, **todos**, and **facts**
+- Todos include **assignee** and **due date** when mentioned
+- Configurable noise filter (min chars, LLM threshold)
+
+### Multi-tenancy
+- Each Slack workspace (`team_id`) maps to an isolated tenant
+- Auto-provisioning on first message from a new workspace
+- Default tenant UUID for single-tenant / MVP deployments
+- All DB queries scoped by `tenant_id`
+
+### Jira integration (optional)
+- Creates Jira issues from extracted todos
+- Includes assignee, due date, and Slack source URL in description
+- Posts created issue keys as a Slack thread reply
+
+### Dashboard & APIs
+- Static dashboard at `/dashboard`
+- Reports, activities, search, and SOP listing endpoints
+- Swagger UI at `/docs`
+
+### SOP workflows
+- Readiness assessment before generation
+- REST endpoint to generate and persist SOPs
+
+---
 
 ## Repository structure
 
-- src/
-  - core/
-  - adapters/
-  - infrastructure/
-- main.py (Entry point)
-- requirements.txt
-- runtime.txt
-- dashboard_static/ (UI assets)
+```
+my-webhook-server/
+├── main.py                      # FastAPI entry point
+├── requirements.txt
+├── runtime.txt                  # Python 3.11.9
+├── render.yaml                  # Render.com deployment blueprint
+├── Procfile                     # Legacy Heroku config
+├── .env.example                 # Environment variable template
+├── dashboard_static/
+│   ├── index.html
+│   ├── app.js
+│   └── app.css
+├── src/
+│   ├── adapters/
+│   │   ├── groq_adapter.py
+│   │   ├── postgres_adapter.py
+│   │   ├── slack_adapter.py
+│   │   ├── jira_adapter.py
+│   │   └── sqlite_adapter.py    # Legacy; not wired in container
+│   ├── api/routes/
+│   │   ├── slack.py
+│   │   ├── reports.py
+│   │   ├── sop.py
+│   │   └── dashboard_api.py
+│   ├── core/
+│   │   ├── interfaces/          # ABCs: LLM, DB, Messaging, Tickets
+│   │   ├── models/              # Pydantic data contracts
+│   │   └── logic/               # Business logic
+│   └── infrastructure/
+│       ├── config.py
+│       ├── container.py
+│       ├── db_schema.py
+│       └── prompts.py
+└── tests/
+    ├── test_smoke.py
+    └── verify_integrations.py
+```
+
+---
+
+## Prerequisites
+
+- **Python 3.11.x** (see `runtime.txt`)
+- **PostgreSQL** — local, or [Supabase](https://supabase.com) for cloud
+- **Slack app** with:
+  - Bot token (`xoxb-...`)
+  - Signing secret
+  - Event Subscriptions → `message.channels` (or relevant message events)
+  - Request URL pointing to `https://your-host/slack/events`
+- **Groq API key** — [console.groq.com](https://console.groq.com)
+
+Optional:
+- **Jira Cloud** account with API token for ticket sync
+
+---
 
 ## Getting started
 
-### Prerequisites
+### 1. Clone and install
 
-- Python: 3.11.x (runtime.txt indicates 3.11.9)
-- Slack app with:
-  - Bot token
-  - Signing secret
-  - Event Subscriptions enabled (message events) pointing to your Flask endpoint
-  - Optional slash commands for reporting and SOP workflows
-- Groq API key for LLM extraction
-
-Optional:
-- Node.js for the sample webhook server (server.js) if you want to test Node-based webhooks separately.
-
-
-### Configuration (environment variables)
-
-Set the following (names reflect functionality implemented in the modules):
-
-- Groq / LLM
-  - GROQ_API_KEY
-
-- Slack
-  - SLACK_BOT_TOKEN
-  - SLACK_SIGNING_SECRET
-  - Optional: a target channel for posting reports/summaries (if your code supports it)
-
-- Storage (PostgreSQL)
-  - POSTGRES_USER
-  - POSTGRES_PASSWORD
-  - POSTGRES_DB
-  - POSTGRES_HOST
-  - POSTGRES_PORT
-
-- Jira (Optional)
-  - JIRA_BASE_URL (e.g., https://yourdomain.atlassian.net)
-  - JIRA_EMAIL
-  - JIRA_API_TOKEN
-  - JIRA_PROJECT_KEY (e.g., PROJ)
-  - JIRA_DEFAULT_ISSUE_TYPE (default: "Task")
-
-- Dashboard (role-aware UI)
-  - If your code is configured for token roles, set environment tokens as applicable (viewer/user/admin).
-  - If you prefer a simple public dashboard, you can expose endpoints without tokens (as implemented in your codebase).
-
-Note: Initialize and reference a single consistent INSIGHTS_DB_PATH everywhere (ingestion and APIs).
-
-### Run locally
 ```bash
-# Install dependencies
+git clone https://github.com/gsj-rifat/my-webhook-server.git
+cd my-webhook-server
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+
+# macOS / Linux
+source .venv/bin/activate
+
 pip install -r requirements.txt
-
-# Run the FastAPI app (dev mode)
-uvicorn main:app --reload
-
-# Production
-uvicorn main:app --host 0.0.0.0 --port 5000 --workers 4
 ```
-- Swagger UI (API Docs): http://localhost:5000/docs
-- Dashboard: http://localhost:5000/dashboard
+
+### 2. Configure environment
+
+Copy the template and fill in your values:
+
+```bash
+cp .env.example .env
+```
+
+**Never commit `.env` to git.** It is listed in `.gitignore`.
+
+### 3. Run locally
+
+```bash
+uvicorn main:app --reload --port 5000
+```
+
+| URL | Purpose |
+|-----|---------|
+| http://localhost:5000/ | Redirects to dashboard |
+| http://localhost:5000/dashboard | Static dashboard UI |
+| http://localhost:5000/docs | Swagger API docs |
+| http://localhost:5000/health | Health check + config flags |
+
+### 4. Expose for Slack (local dev)
+
+Use [ngrok](https://ngrok.com) or similar to tunnel port 5000, then set the Slack Event Subscriptions URL to:
+
+```
+https://your-tunnel.ngrok.io/slack/events
+```
+
+---
+
+## Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GROQ_API_KEY` | Yes | Groq API key for LLM extraction |
+| `GROQ_MODEL` | No | Model ID (default: `llama-3.3-70b-versatile`) |
+| `SLACK_BOT_TOKEN` | Yes* | Slack bot OAuth token |
+| `SLACK_SIGNING_SECRET` | Yes* | Slack request signing secret |
+| `DATABASE_URL` | Yes** | PostgreSQL connection URL (Supabase recommended) |
+| `TARGET_CHANNEL_ID` | No | Slack channel ID for insight summary posts |
+| `REPORT_POST_CHANNEL_ID` | No | Channel for report delivery |
+| `DEFAULT_TENANT_ID` | No | UUID for single-tenant mode (default: null UUID) |
+| `JIRA_BASE_URL` | No | e.g. `https://yourdomain.atlassian.net` |
+| `JIRA_EMAIL` | No | Jira account email |
+| `JIRA_API_TOKEN` | No | Jira API token |
+| `JIRA_PROJECT_KEY` | No | Project key for auto-created issues |
+| `POSTGRES_USER` | No*** | Local Postgres user (fallback if no `DATABASE_URL`) |
+| `POSTGRES_PASSWORD` | No*** | Local Postgres password |
+| `POSTGRES_DB` | No*** | Local Postgres database name |
+| `POSTGRES_HOST` | No*** | Local Postgres host |
+| `POSTGRES_PORT` | No*** | Local Postgres port |
+
+\* Required for Slack integration to work.  
+\** If unset, falls back to SQLite (`insights.db`) — suitable for quick local tests only; production should use Postgres.  
+\*** Used only when `DATABASE_URL` is not set.
+
+### Supabase / cloud Postgres
+
+Set `DATABASE_URL` in your `.env`. The app auto-converts `postgres://` to `postgresql+asyncpg://` and disables prepared statement caching for Supabase transaction pooler compatibility.
+
+Example (from `.env.example`):
+
+```
+DATABASE_URL=postgresql+asyncpg://postgres.your-project:password@aws-0-eu-central-1.pooler.supabase.com:5432/postgres
+```
+
+---
+
+## API reference
+
+### Health
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Returns `healthy` status and boolean flags for Groq, Slack, Jira config |
+
+### Slack
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/slack/events` | Slack Events API webhook (messages, URL verification) |
+
+### Reports
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/reports/daily?date=YYYY-MM-DD&channel_id=` | Daily insight report |
+| `GET` | `/reports/weekly?start_date=YYYY-MM-DD&channel_id=` | Weekly insight report |
+
+### SOP
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/sop/generate` | Check readiness and generate an SOP (`topic`, `context[]`) |
+
+### Dashboard API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/reports?granularity=daily&start=&end=` | Aggregated report data for dashboard |
+| `GET` | `/activities?start=&end=` | Recent insight activities |
+| `GET` | `/search?q=` | Global search over insights |
+| `GET` | `/sops` | List stored SOPs |
+| `GET` | `/summaries` | Summaries (stub — returns empty) |
+
+All dashboard endpoints accept an optional `X-Auth-Token` header (reserved for future auth).
+
+---
 
 ## Slack app setup
 
-- Event Subscriptions
-  - Enable events and point to your Flask events endpoint (e.g., /slack/events).
-  - Subscribe to the message events your workflow requires.
+1. Create a Slack app at [api.slack.com/apps](https://api.slack.com/apps).
+2. Enable **Event Subscriptions** and set Request URL to `https://your-host/slack/events`.
+3. Subscribe to bot events: `message.channels` (and/or `message.groups`, `message.im` as needed).
+4. Add **OAuth scopes**: `channels:history`, `chat:write`, `channels:read` (adjust for your use case).
+5. Install the app to your workspace and copy the **Bot User OAuth Token**.
+6. Copy the **Signing Secret** from Basic Information.
+7. Invite the bot to channels you want monitored.
 
-- Slash commands (from the reporting and SOP modules)
-  - Reporting examples:
-    - report daily [YYYY-MM-DD]
-    - report weekly [YYYY-MM-DD] [to here]
-  - SOP workflows:
-    - SOP readiness checks via REST/command endpoints.
-    - SOP generation with in-channel triggers and REST endpoints.
+---
 
-- Verification
-  - Ensure Slack URL verification challenges are handled by your events route.
-  - Signature verification should be enabled to accept only authentic Slack requests.
+## Deployment (Render)
 
-## API overview (high level)
+The repo includes `render.yaml` for [Render](https://render.com):
 
-- Slack events
-  - POST /slack/events
-    - Handles Slack URL verification and message events.
-    - Runs extraction and persists insights when applicable.
+- **Service name:** `ai-shadow`
+- **Start command:** `uvicorn main:app --host 0.0.0.0 --port $PORT`
+- **Python:** 3.11.9
 
-- Dashboard and report APIs
-  - Auth check (if enabled): /dashboard/api/auth/me
-  - Reports: /dashboard/api/reports (daily, weekly aggregations, parameters for date windows)
-  - Search: /dashboard/api/search (global search over decisions/todos/facts)
-  - CSV export: /dashboard/api/… (if exposed by your reporting module)
-  - SOP endpoints: readiness and generation routes for programmatic access
-  - Summaries and SOPs: CRUD endpoints as exposed by the modules
+Set these secrets in the Render dashboard:
 
-- Static dashboard
-  - /dashboard (index.html)
-  - /dashboard/static/app.js, /dashboard/static/app.css
+- `DATABASE_URL` (Supabase connection string)
+- `GROQ_API_KEY`
+- `SLACK_BOT_TOKEN`
+- `SLACK_SIGNING_SECRET`
+- Jira vars (if used)
+- `TARGET_CHANNEL_ID` (optional)
 
-Note: Exact query parameters and response shapes follow the implementation in reporting.py, report_commands.py, sop_readiness.py, sop_generator.py, and main.py.
+After deploy, update your Slack app's Event Subscriptions URL to your Render service URL.
 
-## Usage guide
+> **Note:** `Procfile` references `gunicorn` for legacy Heroku deploys. For FastAPI on Render, use the `uvicorn` start command in `render.yaml`.
 
-- In Slack
-  - Invite the bot to the relevant channels.
-  - Post normal messages—insightful content is automatically extracted when meaningful.
-  - Use slash commands to generate daily/weekly reports and optionally post them to the current channel.
+---
 
-- In the dashboard
-  - Open /dashboard to view overview tiles and recent activity.
-  - Use Global Search to find decisions, todos, and facts.
-  - Download CSV reports if supported by your build.
+## Database schema
 
-## Deployment
+Tables are created automatically on startup via `init_db()`:
 
-- Render-friendly setup
-  - SQLite is initialized automatically; using a local file works on free tiers (ephemeral).
-  - Keep a single process/worker for SQLite (e.g., gunicorn --workers 1).
-  - Ensure the same INSIGHTS_DB_PATH is used by ingestion and APIs.
-  - Expose /dashboard and /slack/events.
+| Table | Purpose |
+|-------|---------|
+| `tenants` | Organizations; keyed by Slack `team_id` |
+| `users` | Tenant members (future auth) |
+| `insights` | Extracted decisions, todos, facts (JSONB) with `source_url` |
 
-- Environment
-  - Configure required environment variables (Slack, Groq, DB path).
-  - If using token-based dashboard auth, add the token variables.
-  - For public dashboards, use the implementation in your code to disable or relax auth accordingly.
+A default tenant (`00000000-0000-0000-0000-000000000000`) is seeded on first run for single-tenant deployments.
+
+---
+
+## Testing
+
+### Smoke tests
+
+From the project root (set `PYTHONPATH` so `main` resolves):
+
+```bash
+# Windows PowerShell
+$env:PYTHONPATH = "."
+pytest tests/test_smoke.py -v
+
+# macOS / Linux
+PYTHONPATH=. pytest tests/test_smoke.py -v
+```
+
+Smoke tests mock the database and verify `/health`, `/docs`, and `/slack/events` routing.
+
+### Integration verification
+
+With a valid `.env` configured:
+
+```bash
+python tests/verify_integrations.py
+```
+
+This checks DB connectivity, Groq LLM, and end-to-end insight saving.
+
+---
+
+## Message processing flow
+
+When a user posts in a monitored Slack channel:
+
+1. **Signature verification** — HMAC-SHA256 against `SLACK_SIGNING_SECRET`.
+2. **Tenant resolution** — Lookup or create tenant by Slack `team_id`.
+3. **Noise filter** — Skip short or low-signal messages.
+4. **LLM extraction** — Groq returns structured decisions, todos, facts.
+5. **Proof of insight** — Fetch Slack permalink for the source message.
+6. **Persist** — Save `InsightRecord` to PostgreSQL scoped to tenant.
+7. **Jira sync** — If todos exist and Jira is configured, create issues.
+8. **Notify** — Post Jira links in thread; optionally post summary to `TARGET_CHANNEL_ID`.
+
+---
+
+## Security
+
+- **Do not commit `.env`** — secrets belong in environment variables or your host's secret store.
+- Slack requests are verified via signing secret before processing.
+- Rotate credentials immediately if they were ever exposed in git history.
+- The repo ignores: `.env`, `*.db`, `__pycache__/`, `.idea/`, `mcp_config.json`.
+
+---
 
 ## Troubleshooting
 
-- AssertionError: View function mapping overwriting endpoint
-  - Ensure you register the Slack events route exactly once (no duplicate decorators or endpoint names).
+| Problem | Fix |
+|---------|-----|
+| Slack URL verification fails | Ensure `/slack/events` is reachable and returns the `challenge` value |
+| 403 on Slack events | Check `SLACK_SIGNING_SECRET` matches your Slack app |
+| No insights in dashboard | Confirm bot is invited to the channel; check server logs for "Skipping message" |
+| DB connection errors on Supabase | Use transaction pooler URL; app sets `statement_cache_size=0` for asyncpg |
+| Groq model errors | Verify `GROQ_MODEL` is a current model ID (default: `llama-3.3-70b-versatile`) |
+| Dashboard blank / 404 assets | Open `/dashboard` directly; static files are served from `dashboard_static/` |
+| Tests fail with `No module named 'main'` | Run pytest with `PYTHONPATH=.` from the repo root |
 
-- Dashboard shows blank or assets 404
-  - Verify index.html references /dashboard/static/app.js and /dashboard/static/app.css.
-  - Ensure the Flask routes map /dashboard/static/* to the folder containing those files.
-
-- Dashboard unauthorized (401)
-  - If using role tokens, save a valid token in the dashboard Settings (or adjust backend to public mode per your implementation).
-  - Confirm /dashboard/api/auth/me returns 200.
-
-- No data in reports
-  - Confirm Slack events are received (HTTP 200 to /slack/events).
-  - Check logs: the ingestion step should run the LLM extraction and persist via the reporting service.
-  - Verify the SQLite file path and that reads/writes use the same INSIGHTS_DB_PATH.
-
-- SQLite concurrency or locking
-  - Run a single worker process; threads are fine for read-heavy endpoints.
+---
 
 ## Roadmap
 
-- Additional connectors (email, docs, project trackers).
-- More granular analytics and trends over time.
-- Richer SOP templates and approvals.
-- Pluggable persistence (e.g., Postgres) for long-term storage.
-- Role-based permissions and auditability improvements.
+- [ ] Structured logging (replace debug `print` statements)
+- [ ] Dashboard auth (wire `X-Auth-Token` to roles)
+- [ ] Summaries storage and retrieval
+- [ ] Expanded unit test coverage
+- [ ] CI pipeline (pytest on push)
+- [ ] Additional connectors (email, docs, other trackers)
+
+---
 
 ## Contributing
 
-- Fork the repo and create a feature branch.
-- Ensure style and lint checks pass.
-- Add tests or reproducible examples where applicable.
-- Open a PR with a clear description and screenshots/logs for UI/backend changes.
+1. Fork the repo and create a feature branch.
+2. Match existing architecture: interfaces in `core/`, implementations in `adapters/`.
+3. Add or update tests for behavior changes.
+4. Open a PR with a clear description.
+
+---
+
+## License
+
+Private repository — all rights reserved unless otherwise specified by the owner.
