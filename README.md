@@ -21,49 +21,50 @@ In fast-moving teams, important decisions happen in Slack threads — sprint dec
 
 ## What I Built
 
-A production-ready AI backend that:
+I built a production-ready AI backend that:
 
 - **Listens** to Slack channels via webhook (no polling, no manual triggers)
 - **Filters** noise using an LLM-based signal detector to skip irrelevant chatter
-- **Extracts** structured insights — decisions, todos with assignees/due dates, and facts — using a prompted Llama 3.3 70B model via Groq
-- **Persists** everything to PostgreSQL with full multi-tenant isolation
-- **Surfaces** insights through a REST API and a live dashboard
-- **Syncs** todos to Jira automatically when configured
+- **Extracts** structured insights — decisions, todos with assignees/due dates, and facts — using Groq (Llama 3.3 70B)
+- **Persists** everything to PostgreSQL with multi-tenant isolation
+- **Surfaces** insights through a REST API and dashboard
+- **Syncs** todos to Jira when configured
 
-I built this after seeing decisions get lost in Slack threads during sprints — to prove I could design a multi-tenant backend, not just call an LLM API.
+I started this after watching sprint decisions get lost in Slack — I wanted to show I can design a multi-tenant backend, not just call an LLM API.
 
 ## Features
 
-Full reference: **[docs/FEATURES.md](docs/FEATURES.md)**
+I documented the full feature set in **[docs/FEATURES.md](docs/FEATURES.md)**. Highlights:
 
-| Area | Capabilities |
+| Area | What it does |
 |:-----|:-------------|
-| **Slack** | Webhook ingestion, HMAC verification, `@mentions`, thread replies, optional summary channel |
-| **Noise filter** | Skips short messages (default min 12 chars) and low-signal chatter via LLM triage |
-| **AI extraction** | Decisions, todos (assignee + due date), facts — Chief-of-Staff tone normalization |
-| **Storage** | PostgreSQL with multi-tenant isolation, Proof of Insight (Slack permalink) |
-| **Jira** | Auto-create tasks from extracted todos (optional) |
-| **Reports** | Daily & weekly LLM-synthesized reports via REST API |
-| **Dashboard** | Overview, Activities, Reports, Global Search, SOP Library, Summaries |
-| **SOP** | Readiness check + LLM generation from context (`POST /sop/generate`) |
+| **Slack** | Webhook ingestion, HMAC verification, `@mentions`, thread replies |
+| **Noise filter** | Ignores short/low-signal messages (e.g. `hello`, `thanks`) before calling the LLM |
+| **AI extraction** | Pulls out decisions, todos (assignee + due date), and facts |
+| **Storage** | PostgreSQL with tenant isolation + Slack permalink on every insight |
+| **Jira** | Creates tasks from extracted todos (optional) |
+| **Reports** | Daily and weekly summaries via REST API |
+| **Dashboard** | Overview, Activities, Reports, Global Search, SOP Library |
 
-**Noise filter defaults:** messages under 12 characters (e.g. `hello`, `thanks`) are ignored; longer messages are classified by the LLM. Tune via `NOISE_MIN_CHARS`, `NOISE_LLM_THRESHOLD`, `NOISE_FILTER_ENABLED` — see [FEATURES.md § Noise filter](docs/FEATURES.md#2-noise-filter-what-gets-ignored).
-
-> **Note:** SOP list/save and Summaries archive UIs are built; database persistence for those is still on the [roadmap](#roadmap).
+Casual one-liners are filtered out by default (under 12 characters, or low confidence from the LLM). You can tune that with `NOISE_MIN_CHARS`, `NOISE_LLM_THRESHOLD`, and `NOISE_FILTER_ENABLED` — details in [FEATURES.md](docs/FEATURES.md#2-noise-filter-what-gets-ignored).
 
 ## Demo
 
-See [docs/DEMO.md](docs/DEMO.md) for the input → output walkthrough.
+This is the flow I tested on my own Slack workspace:
+
+**1. Someone posts a decision in a channel**
 
 ![Sample Slack message](docs/screenshots/sample-slack-message.jpg)
-![TeamCLAW thread reply with extracted insights](docs/screenshots/teamclaw-slack-response.jpg)
+
+**2. TeamCLAW replies in the thread with extracted insights**
+
+![TeamCLAW thread reply](docs/screenshots/teamclaw-slack-response.jpg)
+
+**3. The same insight shows up in the dashboard**
+
 ![TeamCLAW dashboard](docs/screenshots/teamclaw-dashboard.jpg)
 
-A message like:
-
-> *"We decided to go with PostgreSQL over MongoDB. @rifat can you set up the schema by Friday?"*
-
-Produces this structured insight, stored and searchable within seconds:
+A message like *"We decided to go with PostgreSQL over MongoDB. @rifat can you set up the schema by Friday?"* becomes structured data — decision, todo with assignee and due date, and a link back to the original Slack message:
 
 ```json
 {
@@ -71,12 +72,13 @@ Produces this structured insight, stored and searchable within seconds:
   "content": "Use PostgreSQL over MongoDB",
   "todo": {
     "assignee": "@rifat",
-    "due_date": "Friday",
-    "jira_issue": "ENG-42"
+    "due_date": "Friday"
   },
   "source_url": "https://yourteam.slack.com/archives/..."
 }
 ```
+
+Step-by-step breakdown: [docs/DEMO.md](docs/DEMO.md)
 
 ## Skills Demonstrated
 
@@ -91,8 +93,8 @@ Produces this structured insight, stored and searchable within seconds:
 
 ### Discussion points
 
-| Topic | Talking point |
-|:------|:--------------|
+| Topic | How I'd explain it |
+|:------|:-------------------|
 | Slack 3-second timeout | Return 200 immediately; process in FastAPI `BackgroundTasks`. |
 | Swapping LLM providers | Implement `LLMProvider` ABC; wire a new adapter in `container.py`. |
 | Multi-tenancy | Every DB query scoped by `tenant_id`; Slack `team_id` maps to tenant rows. |
@@ -101,32 +103,30 @@ Produces this structured insight, stored and searchable within seconds:
 
 ## Connect Your Slack & Jira
 
-**Use your own workspace?** Follow the full step-by-step guide:
+Want to run this with your own workspace? I wrote a setup guide that walks through everything in order:
 
 ### → [docs/CONNECT_SLACK_JIRA.md](docs/CONNECT_SLACK_JIRA.md)
 
-That guide walks you through everything in order — no jumping between sections:
+1. Deploy or run the server (Render or local + ngrok)
+2. Create and configure your Slack app
+3. Set environment variables
+4. Connect Jira (optional)
+5. Verify everything works
+6. Send a test message
 
-1. **Deploy or run the server** (Render or local + ngrok)
-2. **Create and configure your Slack app** (events, scopes, install, invite bot)
-3. **Set environment variables** (Groq, Postgres, Slack tokens)
-4. **Connect Jira** (optional — API token and project key)
-5. **Verify connections** (`verify_integrations.py` + `/health`)
-6. **Send a test message** and confirm dashboard + thread reply
-
-You only need to change **Slack app settings** and **environment variables** — no code changes required for a standard setup.
+You only need to configure your Slack app and env vars — no code changes for a standard setup.
 
 ---
 
 ## Architecture & Design Decisions
 
-I followed a **ports-and-adapters (hexagonal) pattern** to keep business logic decoupled from external services. The LLM provider, database, and messaging platform can each be swapped by implementing a new adapter — core extraction logic stays unchanged.
+I used a **ports-and-adapters (hexagonal) pattern** so business logic stays decoupled from Groq, Postgres, Slack, and Jira. Swapping any of those means writing a new adapter, not rewriting the core pipeline.
 
 **Key decisions:**
 
 - **Async throughout** — FastAPI + asyncpg returns 200 to Slack immediately while processing runs in the background
 - **Multi-tenancy by design** — every DB query is scoped by `tenant_id` from day one
-- **Interface-first** — `core/interfaces/` defines ABCs that adapters implement, enabling easy mocking in tests
+- **Interface-first** — `core/interfaces/` defines ABCs that adapters implement, which makes testing straightforward
 
 ```
 Slack Message
@@ -165,8 +165,8 @@ teamclaw/
 ├── .env.example
 ├── dashboard_static/
 ├── docs/
-│   ├── CONNECT_SLACK_JIRA.md    ← connect your own Slack & Jira
-│   ├── FEATURES.md              ← full feature reference
+│   ├── CONNECT_SLACK_JIRA.md
+│   ├── FEATURES.md
 │   ├── DEMO.md
 │   └── screenshots/
 ├── scripts/
@@ -199,15 +199,13 @@ uvicorn main:app --reload --port 5000
 | http://localhost:5000/docs | Swagger API docs |
 | http://localhost:5000/health | Health check |
 
-To connect Slack locally, you need a public tunnel — see **Step 1** in [docs/CONNECT_SLACK_JIRA.md](docs/CONNECT_SLACK_JIRA.md).
+To hook up Slack locally you'll need a public tunnel — see Step 1 in [docs/CONNECT_SLACK_JIRA.md](docs/CONNECT_SLACK_JIRA.md).
 
 ---
 
 ## Environment variables
 
-For the full setup walkthrough (what to copy from Slack/Jira and where to paste it), see **Step 3** in [docs/CONNECT_SLACK_JIRA.md](docs/CONNECT_SLACK_JIRA.md).
-
-Quick reference:
+Copy [.env.example](.env.example) and fill in your keys. For where each value comes from (Slack app, Groq, Jira), see Step 3 in [docs/CONNECT_SLACK_JIRA.md](docs/CONNECT_SLACK_JIRA.md).
 
 | Variable | Required | Description |
 |:---------|:---------|:------------|
@@ -226,8 +224,6 @@ Quick reference:
 | `NOISE_LLM_THRESHOLD` | No | Confidence cutoff for noise filter (default: `0.55`) |
 | `NOISE_FILTER_ENABLED` | No | Toggle noise filter (default: `true`) |
 
-Template: [.env.example](.env.example) · Feature details: [FEATURES.md](docs/FEATURES.md)
-
 ---
 
 ## Testing
@@ -236,9 +232,7 @@ Template: [.env.example](.env.example) · Feature details: [FEATURES.md](docs/FE
 pytest tests/ -v
 ```
 
-CI runs the full test suite on every push via GitHub Actions.
-
-Manual integration check (requires real `.env` — see [CONNECT_SLACK_JIRA.md](docs/CONNECT_SLACK_JIRA.md#step-5--verify-everything-is-connected)):
+CI runs on every push via GitHub Actions. To smoke-test with real credentials:
 
 ```bash
 python scripts/verify_integrations.py
@@ -256,9 +250,9 @@ python scripts/verify_integrations.py
 
 ---
 
-## About This Project
+## About
 
-Personal portfolio project by [gsj-rifat](https://github.com/gsj-rifat). Feedback welcome via Issues.
+Portfolio project by [gsj-rifat](https://github.com/gsj-rifat). Feedback welcome via Issues.
 
 ## License
 
