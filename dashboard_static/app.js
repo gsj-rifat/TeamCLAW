@@ -52,6 +52,9 @@
   function getToken() {
     return localStorage.getItem("dash_token") || "";
   }
+  function authHeaders(extra = {}) {
+    return { "X-Auth-Token": getToken() || "demo", ...extra };
+  }
   function setToken(val) {
     localStorage.setItem("dash_token", val || "");
   }
@@ -114,11 +117,6 @@
 
   // ===================== Reports =====================
   async function fetchReports() {
-    const token = getToken();
-    if (!token) {
-      alert("Please set your X-Auth-Token in Settings first.");
-      return;
-    }
     const granularity = (el("rep-granularity")?.value || "daily").toLowerCase();
     const start = el("rep-start")?.value?.trim();
     const end = el("rep-end")?.value?.trim();
@@ -134,7 +132,7 @@
 
     try {
       const res = await fetch(`${API_BASE}/reports?${qs.toString()}`, {
-        headers: { "X-Auth-Token": token },
+        headers: authHeaders(),
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || json.status === "error") {
@@ -191,9 +189,6 @@
 
   // ===================== SOP Library =====================
   async function loadSops() {
-    const token = getToken();
-    if (!token) return;
-
     const q = el("sop-q")?.value.trim() || "";
     const status = el("sop-status")?.value || "";
 
@@ -203,7 +198,7 @@
 
     try {
       const res = await fetch(`${API_BASE}/sops?${qs.toString()}`, {
-        headers: { "X-Auth-Token": token },
+        headers: authHeaders(),
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || json.status === "error") throw new Error(json.error || "Failed to load SOPs");
@@ -334,7 +329,7 @@
 
     try {
       const res = await fetch(`${API_BASE}/summaries?${qs.toString()}`, {
-        headers: { "X-Auth-Token": getToken() },
+        headers: authHeaders(),
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || json.status === "error") throw new Error(json.error || "Failed to load summaries");
@@ -543,12 +538,6 @@
   }
 
   async function performGlobalSearch() {
-    const token = getToken();
-    if (!token) {
-      alert("Please set your X-Auth-Token in Settings first.");
-      return;
-    }
-
     const q = el("gs-q")?.value.trim() || "";
     const channel_id = el("gs-channel")?.value.trim() || "";
     const status = el("gs-status")?.value || "";
@@ -562,7 +551,7 @@
     if (start) qs.set("start", start);
     if (end) qs.set("end", end);
 
-    const headers = { "X-Auth-Token": token };
+    const headers = authHeaders();
     const selected = gsSelectedTypes();
 
     const tasks = [];
@@ -659,12 +648,6 @@
 
   // ===================== Activities =====================
   async function loadActivities() {
-    const token = getToken();
-    if (!token) {
-      alert("Please set your X-Auth-Token in Settings first.");
-      return;
-    }
-
     const start = el("activities-start")?.value?.trim() || "";
     const end = el("activities-end")?.value?.trim() || "";
     const channel_id = el("activities-channel")?.value?.trim() || "";
@@ -678,7 +661,7 @@
 
     try {
       const res = await fetch(`${API_BASE}/activities?${qs.toString()}`, {
-        headers: { "X-Auth-Token": token },
+        headers: authHeaders(),
       });
       const json = await res.json().catch(() => ({}));
       if (!res.ok || json.status === "error") throw new Error(json.error || "Failed to load activities");
@@ -778,17 +761,12 @@
 
   // ===================== Overview =====================
   async function loadOverview() {
-    const token = getToken();
     const setCount = (id, val) => {
       const n = el(id);
       if (n) n.textContent = String(val ?? 0);
     };
-    if (!token) {
-      ["ovr-reports-today","ovr-reports-week","ovr-sops-today","ovr-sops-week","ovr-summaries-today","ovr-summaries-week","ovr-activities-today","ovr-activities-week"].forEach((id) => setCount(id, 0));
-      return;
-    }
 
-    const headers = { "X-Auth-Token": token };
+    const headers = authHeaders();
     const today = todayISO();
     const wStart = weekStartISO();
     const [todayStartMs, todayEndMs] = dayBoundsMs(today);

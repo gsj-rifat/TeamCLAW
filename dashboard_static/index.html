@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>AI Shadow Coach — Dashboard</title>
+    <title>TeamCLAW — Dashboard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="stylesheet" href="/dashboard/app.css" />
     <style>
@@ -14,7 +14,8 @@
   <body>
     <div class="app">
       <aside class="nav">
-        <h1>AI Shadow Coach</h1>
+        <h1>TeamCLAW</h1>
+        <p class="muted" style="margin:0 0 12px;font-size:13px">Team knowledge capture</p>
         <button class="active" data-action="show-overview">Overview</button>
         <button data-action="show-activities">Activities</button>
         <button data-action="show-reports">Reports</button>
@@ -366,7 +367,7 @@
         <!-- SETTINGS -->
         <section class="panel hidden" data-view="settings" id="settings-panel">
           <h2>Settings</h2>
-          <p>Paste your X-Auth-Token for the Dashboard API.</p>
+          <p>Optional API token for write operations. Read-only demo works without a token.</p>
           <input id="token-input" placeholder="X-Auth-Token" />
           <div class="actions" style="margin-top:12px">
             <button class="primary" id="token-save-btn">Save Token</button>
