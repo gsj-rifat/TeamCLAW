@@ -59,8 +59,11 @@ class InsightModel(Base):
 
     tenant = relationship("TenantModel", back_populates="insights")
 
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from src.infrastructure.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 # Default tenant UUID for MVP/single-tenant deployment
 DEFAULT_TENANT_ID = UUID("00000000-0000-0000-0000-000000000000")
@@ -91,6 +94,6 @@ async def init_db(engine: AsyncEngine):
             )
             session.add(default_tenant)
             await session.commit()
-            print("INFO: Seeded default tenant")
+            logger.info("Seeded default tenant")
         else:
-            print("INFO: Default tenant already exists")
+            logger.info("Default tenant already exists")
