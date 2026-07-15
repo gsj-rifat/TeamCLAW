@@ -55,20 +55,9 @@ Full reference: **[docs/FEATURES.md](docs/FEATURES.md)**
 
 See [docs/DEMO.md](docs/DEMO.md) for the input → output walkthrough.
 
-**Screenshots** (Slack thread reply, dashboard, API docs) live in [docs/screenshots/](docs/screenshots/). Add these files to show the flow in the README:
-
-| File | Shows |
-|:-----|:------|
-| `slack-thread.png` | Slack message + TeamCLAW thread reply |
-| `dashboard-activities.png` | Dashboard with captured insights |
-| `swagger-docs.png` | FastAPI Swagger UI at `/docs` |
-
-Once added, embed at the top of this section:
-
-```markdown
-![Slack thread reply](docs/screenshots/slack-thread.png)
-![Dashboard activities](docs/screenshots/dashboard-activities.png)
-```
+![Sample Slack message](docs/screenshots/sample-slack-message.jpg)
+![TeamCLAW thread reply with extracted insights](docs/screenshots/teamclaw-slack-response.jpg)
+![TeamCLAW dashboard](docs/screenshots/teamclaw-dashboard.jpg)
 
 A message like:
 
