@@ -184,8 +184,8 @@ teamclaw/
 ## Getting started (local development)
 
 ```bash
-git clone https://github.com/gsj-rifat/teamclaw.git
-cd teamclaw
+git clone https://github.com/gsj-rifat/TeamCLAW.git
+cd TeamCLAW
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -252,7 +252,10 @@ python scripts/verify_integrations.py
 
 ## About
 
-Portfolio project by [gsj-rifat](https://github.com/gsj-rifat). Feedback welcome via Issues.
+Built by [Rifat](https://github.com/gsj-rifat) while completing an M.Sc. in EEIT at Christian-Albrecht-Universität Kiel. The goal was to design a production-grade multi-tenant LLM backend — not a notebook demo.
+
+Open to AI engineering and backend roles (Germany / remote).  
+→ [LinkedIn](https://www.linkedin.com/in/gsjrifat/)
 
 ## License
 

@@ -49,7 +49,19 @@ Stored record fields (simplified):
 
 ## Dashboard
 
-After deployment, open **Activities** or **Global Search** on your dashboard (`/dashboard`) to see captured insights. See [docs/screenshots/](screenshots/) for example screenshots.
+After deployment, open **Activities** or **Global Search** on your dashboard (`/dashboard`) to see captured insights.
+
+**1. Input — decision posted in Slack**
+
+![Sample Slack message](screenshots/sample-slack-message.jpg)
+
+**2. Output — TeamCLAW thread reply**
+
+![TeamCLAW thread reply](screenshots/teamclaw-slack-response.jpg)
+
+**3. Output — same insight in the dashboard**
+
+![TeamCLAW dashboard](screenshots/teamclaw-dashboard.jpg)
 
 ## What does *not* trigger extraction
 
