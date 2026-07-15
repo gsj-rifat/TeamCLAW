@@ -290,3 +290,9 @@ If nothing happens, see [Troubleshooting](#troubleshooting) below.
 | `DEFAULT_TENANT_ID` | No | Default tenant UUID |
 
 See [.env.example](../.env.example) for a copy-paste template.
+
+## Related docs
+
+- [FEATURES.md](FEATURES.md) — complete feature reference
+- [DEMO.md](DEMO.md) — example input → output walkthrough
+- [screenshots/](screenshots/) — visual demo assets

@@ -49,7 +49,7 @@ Stored record fields (simplified):
 
 ## Dashboard
 
-Open **Activities** or **Global Search** on the live dashboard to see captured insights for the tenant.
+After deployment, open **Activities** or **Global Search** on your dashboard (`/dashboard`) to see captured insights. See [docs/screenshots/](screenshots/) for example screenshots.
 
 ## What does *not* trigger extraction
 
@@ -61,7 +61,7 @@ Short or low-signal messages are intentionally skipped:
 
 To test, send a full sentence with a decision or assigned task.
 
-## Interview talking points
+## Discussion points
 
 | Question | Answer |
 |----------|--------|
