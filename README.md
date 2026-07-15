@@ -5,7 +5,7 @@
 
 **No manual note-taking. No missed follow-ups. No forgotten decisions.**
 
-[![CI](https://github.com/gsj-rifat/teamclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/gsj-rifat/teamclaw/actions/workflows/ci.yml)
+[![CI](https://github.com/gsj-rifat/TeamCLAW/actions/workflows/ci.yml/badge.svg)](https://github.com/gsj-rifat/TeamCLAW/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com)
 
